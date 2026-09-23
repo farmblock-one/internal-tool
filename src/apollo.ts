@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { BrowserContext, Page } from 'playwright';
+import type { BrowserContext, Locator, Page } from 'playwright';
 import { logger } from './logger.js';
 
 /**
@@ -29,6 +29,40 @@ async function clickFirstVisible(
     if (visible) {
       await target.click();
       return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Một số nút icon-only trong Apollo KHÔNG có aria-label/title — tên của nó chỉ xuất hiện dưới
+ * dạng tooltip khi thực sự di chuột (hover) vào. Hàm này hover lần lượt qua các nút không có
+ * chữ (icon-only) đang hiển thị, đọc tooltip vừa hiện ra, khớp với `tooltipPattern` thì bấm.
+ */
+async function clickButtonByTooltip(
+  page: Page,
+  tooltipPattern: RegExp,
+  maxCandidates = 60,
+): Promise<boolean> {
+  const all = page.locator('button, [role="button"]');
+  const count = Math.min(await all.count(), maxCandidates);
+  for (let i = 0; i < count; i++) {
+    const btn = all.nth(i);
+    const visible = await btn.isVisible().catch(() => false);
+    if (!visible) continue;
+    const text = ((await btn.textContent().catch(() => '')) ?? '').trim();
+    if (text) continue; // chỉ quan tâm nút icon-only (không có chữ hiển thị)
+
+    await btn.hover().catch(() => {});
+    await page.waitForTimeout(350);
+    const tooltip: Locator = page.locator('[role="tooltip"], [class*="tooltip" i]').first();
+    const tooltipVisible = await tooltip.isVisible({ timeout: 600 }).catch(() => false);
+    if (tooltipVisible) {
+      const tooltipText = (await tooltip.textContent().catch(() => '')) ?? '';
+      if (tooltipPattern.test(tooltipText)) {
+        await btn.click();
+        return true;
+      }
     }
   }
   return false;
@@ -170,18 +204,21 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   }
 
   // 3. Mở menu bulk action -> Export -> Export Emails
-  // Nút Export trong thanh công cụ thường chỉ có icon, không có chữ, nên thử nhiều cách nhận diện.
-  const openedExportMenu = await clickFirstVisible([
-    page.getByRole('button', { name: /^export$/i }),
-    page.getByRole('button', { name: /export/i }),
-    page.locator('[aria-label*="export" i]'),
-    page.locator('[title*="export" i]'),
-    page.getByRole('button', { name: /^download$/i }),
-    page.locator('[aria-label*="download" i]'),
-  ]);
+  // Nút Export chỉ có icon, không có aria-label/title — tên "Export" chỉ hiện qua tooltip khi
+  // hover, nên phải hover từng nút icon-only để tìm đúng cái có tooltip "Export".
+  let openedExportMenu = await clickButtonByTooltip(page, /^export$/i);
+  if (!openedExportMenu) {
+    // Phòng khi tooltip không bắt được kịp, vẫn thử thêm các cách nhận diện tĩnh như cũ.
+    openedExportMenu = await clickFirstVisible([
+      page.getByRole('button', { name: /^export$/i }),
+      page.getByRole('button', { name: /export/i }),
+      page.locator('[aria-label*="export" i]'),
+      page.locator('[title*="export" i]'),
+    ]);
+  }
   if (!openedExportMenu) {
     await dumpToolbarButtons(page);
-    throw new Error('Không tìm thấy nút Export trong thanh công cụ bulk action (đã thử theo tên, aria-label, title).');
+    throw new Error('Không tìm thấy nút Export (đã thử hover đọc tooltip + tên/aria-label/title).');
   }
 
   const clickedExportEmails = await clickFirstVisible([
