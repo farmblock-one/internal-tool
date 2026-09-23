@@ -99,12 +99,18 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   const headerCheckbox = tableScope.getByRole('checkbox').first();
   await headerCheckbox.click({ timeout: 15_000 });
 
-  const selectAllLink = page.getByText(/select all .* contacts?/i).first();
-  if (await selectAllLink.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await selectAllLink.click();
+  // Click checkbox đầu bảng mở ra 1 dropdown hỏi chọn kiểu nào: "Select number of people" /
+  // "Select this page N" / "Select all N" (radio option, không có chữ "contacts" đi kèm).
+  const selectAllOption = page.getByText(/^select all$/i).first();
+  if (await selectAllOption.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await selectAllOption.click();
+    const applyBtn = page.getByRole('button', { name: /^apply$/i }).first();
+    if (await applyBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await applyBtn.click();
+    }
     logger.info('Đã chọn toàn bộ contact trong list.');
   } else {
-    logger.warn('Không thấy link "Select all N contacts" — có thể list chỉ có 1 trang, hoặc selector cần chỉnh lại.');
+    logger.warn('Không thấy dropdown "Select all" — có thể Apollo đã tự chọn hết, hoặc UI khác đi.');
   }
 
   // 3. Mở menu bulk action -> Export -> Export Emails
