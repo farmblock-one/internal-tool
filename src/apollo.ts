@@ -49,6 +49,30 @@ async function clickFirstVisible(
  *                                             # sửa lại trong file này.
  */
 
+/**
+ * In ra log danh sách toàn bộ nút (button/role=button) đang có trên trang kèm text/aria-label/
+ * title của chúng — để biết chính xác tên thật của 1 nút icon-only thay vì đoán qua ảnh.
+ */
+async function dumpToolbarButtons(page: Page): Promise<void> {
+  try {
+    const buttons = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"]'));
+      return els
+        .map((el) => ({
+          text: (el.textContent ?? '').trim().slice(0, 50),
+          ariaLabel: el.getAttribute('aria-label'),
+          title: el.getAttribute('title'),
+          testId: el.getAttribute('data-testid'),
+        }))
+        .filter((b) => b.text || b.ariaLabel || b.title || b.testId)
+        .slice(0, 80);
+    });
+    logger.error('DEBUG danh sách nút trên trang:', JSON.stringify(buttons, null, 2));
+  } catch (evalErr) {
+    logger.warn('Không lấy được danh sách nút debug:', evalErr);
+  }
+}
+
 /** Chụp ảnh màn hình trang hiện tại để debug khi có bước nào đó fail, không throw nếu tự nó lỗi. */
 async function dumpDebugScreenshot(page: Page, downloadDir: string, label: string): Promise<void> {
   try {
@@ -144,6 +168,7 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
     page.locator('[aria-label*="download" i]'),
   ]);
   if (!openedExportMenu) {
+    await dumpToolbarButtons(page);
     throw new Error('Không tìm thấy nút Export trong thanh công cụ bulk action (đã thử theo tên, aria-label, title).');
   }
 
