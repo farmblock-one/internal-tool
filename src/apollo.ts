@@ -63,15 +63,16 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   // <div> giả lập, nên thử vài kiểu selector phổ biến; nếu không cái nào khớp trong 30s,
   // vẫn tiếp tục (không throw) để các bước sau + ảnh debug cho biết thực tế trang đang hiện gì.
   const tableCandidates = ['table', '[role="table"]', '[role="grid"]', '[data-testid*="table" i]'];
+  let tableScope: ReturnType<Page['locator']> = page.locator('body');
   let tableFound = false;
   for (const selector of tableCandidates) {
-    const visible = await page
-      .locator(selector)
-      .first()
+    const loc = page.locator(selector).first();
+    const visible = await loc
       .waitFor({ state: 'visible', timeout: 10_000 })
       .then(() => true)
       .catch(() => false);
     if (visible) {
+      tableScope = loc;
       tableFound = true;
       logger.info(`Đã thấy bảng contact (selector: ${selector}).`);
       break;
@@ -92,8 +93,11 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   }
 
   // 2. Chọn tất cả contact trong list (không chỉ trang hiện tại)
-  const headerCheckbox = page.locator('thead input[type="checkbox"]').first();
-  await headerCheckbox.click();
+  // Apollo dùng checkbox tự chế (không phải <input type="checkbox">), nên tìm theo "role"
+  // (accessibility) thay vì đúng thẻ HTML — cách này khớp được cả 2 kiểu.
+  // Checkbox chọn-tất-cả nằm ở đầu bảng (trước cột NAME), nên lấy checkbox đầu tiên trong bảng.
+  const headerCheckbox = tableScope.getByRole('checkbox').first();
+  await headerCheckbox.click({ timeout: 15_000 });
 
   const selectAllLink = page.getByText(/select all .* contacts?/i).first();
   if (await selectAllLink.isVisible({ timeout: 3000 }).catch(() => false)) {
