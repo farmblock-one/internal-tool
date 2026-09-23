@@ -15,6 +15,26 @@ async function softWaitNetworkIdle(page: Page, timeout = 8000): Promise<void> {
 }
 
 /**
+ * Nhiều nút trong Apollo chỉ có icon, không có chữ, nên "tên" mà Playwright đọc được
+ * (accessible name, dùng để match getByRole) có thể không chứa từ mình đoán (vd "export").
+ * Hàm này thử lần lượt nhiều cách nhận diện 1 nút, bấm vào cái đầu tiên tìm thấy.
+ */
+async function clickFirstVisible(
+  candidates: ReturnType<Page['locator']>[],
+  timeout = 4000,
+): Promise<boolean> {
+  for (const loc of candidates) {
+    const target = loc.first();
+    const visible = await target.isVisible({ timeout }).catch(() => false);
+    if (visible) {
+      await target.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * ⚠️ GIẢ ĐỊNH CẦN KIỂM CHỨNG:
  * Các selector dưới đây được viết theo cấu trúc UI phổ biến của Apollo.io (bấm "Clear all"
  * để xoá filter, tick checkbox đầu bảng rồi bấm link "Select all N contacts", mở menu bulk
@@ -114,8 +134,27 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   }
 
   // 3. Mở menu bulk action -> Export -> Export Emails
-  await page.getByRole('button', { name: /export/i }).first().click();
-  await page.getByText(/export emails?/i).first().click();
+  // Nút Export trong thanh công cụ thường chỉ có icon, không có chữ, nên thử nhiều cách nhận diện.
+  const openedExportMenu = await clickFirstVisible([
+    page.getByRole('button', { name: /^export$/i }),
+    page.getByRole('button', { name: /export/i }),
+    page.locator('[aria-label*="export" i]'),
+    page.locator('[title*="export" i]'),
+    page.getByRole('button', { name: /^download$/i }),
+    page.locator('[aria-label*="download" i]'),
+  ]);
+  if (!openedExportMenu) {
+    throw new Error('Không tìm thấy nút Export trong thanh công cụ bulk action (đã thử theo tên, aria-label, title).');
+  }
+
+  const clickedExportEmails = await clickFirstVisible([
+    page.getByText(/export emails?/i),
+    page.getByRole('menuitem', { name: /export emails?/i }),
+    page.getByRole('menuitem', { name: /email/i }),
+  ]);
+  if (!clickedExportEmails) {
+    logger.warn('Không thấy menu item "Export Emails" — có thể Export đã chạy thẳng không qua menu con.');
+  }
 
   // Một số flow của Apollo có thêm dialog xác nhận trước khi export thật sự
   const confirmExportBtn = page.getByRole('button', { name: /^export$/i }).last();
