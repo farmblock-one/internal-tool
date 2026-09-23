@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.chrome-profile/
+data/downloads/*
+data/processed/*
+!data/downloads/.gitkeep
+!data/processed/.gitkeep
+service-account.json
+*.log
