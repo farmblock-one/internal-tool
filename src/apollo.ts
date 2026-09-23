@@ -29,19 +29,57 @@ async function softWaitNetworkIdle(page: Page, timeout = 8000): Promise<void> {
  *                                             # sửa lại trong file này.
  */
 
+/** Chụp ảnh màn hình trang hiện tại để debug khi có bước nào đó fail, không throw nếu tự nó lỗi. */
+async function dumpDebugScreenshot(page: Page, downloadDir: string, label: string): Promise<void> {
+  try {
+    const debugPath = path.join(downloadDir, `debug-${label}-${Date.now()}.png`);
+    await page.screenshot({ path: debugPath, fullPage: true });
+    logger.error(`Đã lưu ảnh chụp màn hình lúc lỗi: ${debugPath}`);
+  } catch (screenshotErr) {
+    logger.warn('Không chụp được ảnh debug:', screenshotErr);
+  }
+}
+
 export async function exportListEmails(
   context: BrowserContext,
   listUrl: string,
   downloadDir: string,
 ): Promise<string> {
   const page = await context.newPage();
+  try {
+    return await exportListEmailsInner(page, listUrl, downloadDir);
+  } catch (err) {
+    await dumpDebugScreenshot(page, downloadDir, 'export');
+    throw err;
+  }
+}
+
+async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: string): Promise<string> {
   logger.info(`Mở list Apollo: ${listUrl}`);
   await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
   await softWaitNetworkIdle(page);
 
-  // Chờ bảng danh sách contact thực sự xuất hiện (dấu hiệu tin cậy hơn networkidle
-  // để biết trang đã tải xong dữ liệu list, chứ không chỉ tải xong khung giao diện).
-  await page.locator('table').first().waitFor({ state: 'visible', timeout: 60_000 });
+  // Chờ bảng danh sách contact thực sự xuất hiện. Không rõ Apollo dùng <table> thật hay
+  // <div> giả lập, nên thử vài kiểu selector phổ biến; nếu không cái nào khớp trong 30s,
+  // vẫn tiếp tục (không throw) để các bước sau + ảnh debug cho biết thực tế trang đang hiện gì.
+  const tableCandidates = ['table', '[role="table"]', '[role="grid"]', '[data-testid*="table" i]'];
+  let tableFound = false;
+  for (const selector of tableCandidates) {
+    const visible = await page
+      .locator(selector)
+      .first()
+      .waitFor({ state: 'visible', timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (visible) {
+      tableFound = true;
+      logger.info(`Đã thấy bảng contact (selector: ${selector}).`);
+      break;
+    }
+  }
+  if (!tableFound) {
+    logger.warn('Không tìm thấy bảng contact với các selector thử sẵn — tiếp tục luôn, sẽ có ảnh debug nếu bước sau fail.');
+  }
 
   // 1. Xoá tất cả filter đang áp dụng lên list
   const clearAllBtn = page.getByRole('button', { name: /clear all/i }).first();
@@ -91,8 +129,17 @@ export async function exportListEmails(
   return filePath;
 }
 
-export async function importCsv(context: BrowserContext, filePath: string): Promise<void> {
+export async function importCsv(context: BrowserContext, filePath: string, downloadDir: string): Promise<void> {
   const page = await context.newPage();
+  try {
+    await importCsvInner(page, filePath);
+  } catch (err) {
+    await dumpDebugScreenshot(page, downloadDir, 'import');
+    throw err;
+  }
+}
+
+async function importCsvInner(page: Page, filePath: string): Promise<void> {
   await page.goto('https://app.apollo.io/#/import', { waitUntil: 'domcontentloaded' });
   await softWaitNetworkIdle(page);
 

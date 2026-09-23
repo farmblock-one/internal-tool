@@ -37,7 +37,7 @@ export async function runFlow(apolloListUrl: string): Promise<FlowResult> {
     const reimportRows = onlyEmailAndResult(debounceRows);
     const reimportPath = path.join(PROCESSED_DIR, `apollo-reimport-${Date.now()}.csv`);
     writeCsv(reimportPath, reimportRows);
-    await importCsv(context, reimportPath);
+    await importCsv(context, reimportPath, DOWNLOAD_DIR);
 
     // 5. Từ file gốc: bỏ Invalid + Unknown, chỉ giữ Safe to Send + Risky
     const filteredRows = filterByResult(debounceRows, ['Safe to Send', 'Risky']);
