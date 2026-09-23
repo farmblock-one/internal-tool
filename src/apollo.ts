@@ -1,6 +1,18 @@
 import path from 'node:path';
-import type { BrowserContext } from 'playwright';
+import type { BrowserContext, Page } from 'playwright';
 import { logger } from './logger.js';
+
+/**
+ * Apollo là 1 SPA có nhiều request nền chạy liên tục (real-time update, tracking...),
+ * nên `page.waitForLoadState('networkidle')` gần như không bao giờ thực sự "idle" và hay
+ * bị timeout dù trang đã tải/thao tác xong bình thường. Dùng hàm này để "chờ cho có" mà
+ * không làm crash cả luồng nếu nó timeout — chỉ coi như 1 khoảng nghỉ ngắn.
+ */
+async function softWaitNetworkIdle(page: Page, timeout = 8000): Promise<void> {
+  await page.waitForLoadState('networkidle', { timeout }).catch(() => {
+    logger.warn('Mạng chưa "idle" hẳn sau khi chờ, tiếp tục luôn (thường không sao với Apollo).');
+  });
+}
 
 /**
  * ⚠️ GIẢ ĐỊNH CẦN KIỂM CHỨNG:
@@ -25,13 +37,17 @@ export async function exportListEmails(
   const page = await context.newPage();
   logger.info(`Mở list Apollo: ${listUrl}`);
   await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle');
+  await softWaitNetworkIdle(page);
+
+  // Chờ bảng danh sách contact thực sự xuất hiện (dấu hiệu tin cậy hơn networkidle
+  // để biết trang đã tải xong dữ liệu list, chứ không chỉ tải xong khung giao diện).
+  await page.locator('table').first().waitFor({ state: 'visible', timeout: 60_000 });
 
   // 1. Xoá tất cả filter đang áp dụng lên list
   const clearAllBtn = page.getByRole('button', { name: /clear all/i }).first();
   if (await clearAllBtn.isVisible().catch(() => false)) {
     await clearAllBtn.click();
-    await page.waitForLoadState('networkidle');
+    await softWaitNetworkIdle(page);
     logger.info('Đã xoá filter.');
   } else {
     logger.warn('Không thấy nút "Clear all" — có thể list đang không có filter, hoặc selector cần chỉnh lại.');
@@ -78,7 +94,7 @@ export async function exportListEmails(
 export async function importCsv(context: BrowserContext, filePath: string): Promise<void> {
   const page = await context.newPage();
   await page.goto('https://app.apollo.io/#/import', { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle');
+  await softWaitNetworkIdle(page);
 
   const fileInput = page.locator('input[type="file"]').first();
   await fileInput.setInputFiles(filePath);
