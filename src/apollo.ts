@@ -56,18 +56,30 @@ async function clickFirstVisible(
 async function dumpToolbarButtons(page: Page): Promise<void> {
   try {
     const buttons = await page.evaluate(() => {
-      const els = Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"]'));
-      return els
-        .map((el) => ({
-          text: (el.textContent ?? '').trim().slice(0, 50),
-          ariaLabel: el.getAttribute('aria-label'),
-          title: el.getAttribute('title'),
-          testId: el.getAttribute('data-testid'),
-        }))
-        .filter((b) => b.text || b.ariaLabel || b.title || b.testId)
-        .slice(0, 80);
+      // Tìm phần tử chứa chữ "N selected" (vd "Clear 1783 selected") để xác định đúng thanh
+      // công cụ bulk-action, rồi chỉ liệt kê nút BÊN TRONG nó — tránh lẫn hàng chục nút khác
+      // (dropdown cột, sidebar...) nằm rải rác toàn trang khiến danh sách quá dài để xem.
+      const all = Array.from(document.querySelectorAll('body *'));
+      const marker = all.find(
+        (el) => /\d+\s+selected/i.test(el.textContent || '') && el.children.length <= 3,
+      );
+      let scope: Element = document.body;
+      if (marker) {
+        let el: Element = marker;
+        for (let i = 0; i < 5 && el.parentElement; i++) el = el.parentElement;
+        scope = el;
+      }
+      const els = Array.from(scope.querySelectorAll('button, [role="button"]'));
+      return els.map((el, i) => ({
+        index: i,
+        text: (el.textContent ?? '').trim().slice(0, 40),
+        ariaLabel: el.getAttribute('aria-label'),
+        title: el.getAttribute('title'),
+        testId: el.getAttribute('data-testid'),
+        classes: (el.getAttribute('class') ?? '').slice(0, 100),
+      }));
     });
-    logger.error('DEBUG danh sách nút trên trang:', JSON.stringify(buttons, null, 2));
+    logger.error('DEBUG danh sách nút trong thanh bulk-action:', JSON.stringify(buttons, null, 2));
   } catch (evalErr) {
     logger.warn('Không lấy được danh sách nút debug:', evalErr);
   }
