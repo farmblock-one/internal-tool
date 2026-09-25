@@ -41,14 +41,15 @@ async function clickFirstVisible(
  */
 async function clickButtonByTooltip(
   page: Page,
+  scope: Locator,
   tooltipPattern: RegExp,
-  maxCandidates = 40,
+  maxCandidates = 20,
 ): Promise<boolean> {
   // Không đoán class/role của tooltip nữa (class của Apollo bị mã hoá ngẫu nhiên, không đoán
   // được) — thay vào đó, hover xong chỉ kiểm tra xem CHỮ đó có hiện ra ở đâu trên trang không.
   const textAppears = page.getByText(tooltipPattern);
 
-  const all = page.locator('button, [role="button"]');
+  const all = scope.locator('button, [role="button"]');
   const count = Math.min(await all.count(), maxCandidates);
   for (let i = 0; i < count; i++) {
     const btn = all.nth(i);
@@ -67,6 +68,34 @@ async function clickButtonByTooltip(
     }
   }
   return false;
+}
+
+/**
+ * Tìm locator đầu tiên (trong vài ứng viên khớp `candidates`) thực sự đang hiển thị — tránh
+ * việc lấy nhầm 1 phần tử trùng văn bản nhưng đang ẩn (vd trạng thái "0 selected" mặc định).
+ */
+async function findVisibleLocator(candidates: Locator, maxCheck = 10): Promise<Locator | null> {
+  const count = Math.min(await candidates.count(), maxCheck);
+  for (let i = 0; i < count; i++) {
+    const el = candidates.nth(i);
+    if (await el.isVisible().catch(() => false)) return el;
+  }
+  return null;
+}
+
+/**
+ * Từ 1 điểm neo (vd chữ "Clear 1911 selected"), đi ngược lên các phần tử cha tới khi tìm được
+ * 1 vùng chứa đủ nhiều nút (>=5) — đó chính là thanh công cụ bulk-action, KHÔNG phải đoán cứng
+ * số cấp cha cố định (dễ đi lố ra ngoài toàn trang, lẫn nút ở nơi khác như chuông thông báo).
+ */
+async function findToolbarScope(marker: Locator): Promise<Locator> {
+  let scope = marker;
+  for (let level = 1; level <= 6; level++) {
+    scope = scope.locator('xpath=..');
+    const count = await scope.locator('button, [role="button"]').count();
+    if (count >= 5) return scope;
+  }
+  return scope;
 }
 
 /**
@@ -209,43 +238,43 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
     logger.warn('Không thấy dropdown "Select all" — có thể Apollo đã tự chọn hết, hoặc UI khác đi.');
   }
 
-  // 3. Mở menu bulk action -> Export -> Export Emails
+  // 3. Bấm icon Export trong đúng thanh công cụ bulk-action (không phải nút chuông thông báo
+  // hay icon nào khác trên trang — thu hẹp phạm vi tìm về đúng thanh công cụ trước).
+  const clearSelectedCandidates = page.getByText(/clear\s+[\d,]+\s+selected/i);
+  const clearSelectedMarker = await findVisibleLocator(clearSelectedCandidates);
+  const toolbarScope = clearSelectedMarker ? await findToolbarScope(clearSelectedMarker) : page.locator('body');
+  if (!clearSelectedMarker) {
+    logger.warn('Không thấy chữ "Clear N selected" — có thể chưa chọn được contact nào, hoặc UI khác đi.');
+  }
+
   // Nút Export chỉ có icon, không có aria-label/title — tên "Export" chỉ hiện qua tooltip khi
-  // hover, nên phải hover từng nút icon-only để tìm đúng cái có tooltip "Export".
-  let openedExportMenu = await clickButtonByTooltip(page, /^export$/i);
-  if (!openedExportMenu) {
+  // hover, nên phải hover từng nút icon-only trong thanh công cụ để tìm đúng cái có tooltip "Export".
+  let clickedExportIcon = await clickButtonByTooltip(page, toolbarScope, /^export$/i);
+  if (!clickedExportIcon) {
     // Phòng khi tooltip không bắt được kịp, vẫn thử thêm các cách nhận diện tĩnh như cũ.
-    openedExportMenu = await clickFirstVisible([
-      page.getByRole('button', { name: /^export$/i }),
-      page.getByRole('button', { name: /export/i }),
-      page.locator('[aria-label*="export" i]'),
-      page.locator('[title*="export" i]'),
+    clickedExportIcon = await clickFirstVisible([
+      toolbarScope.getByRole('button', { name: /^export$/i }),
+      toolbarScope.getByRole('button', { name: /export/i }),
+      toolbarScope.locator('[aria-label*="export" i]'),
+      toolbarScope.locator('[title*="export" i]'),
     ]);
   }
-  if (!openedExportMenu) {
+  if (!clickedExportIcon) {
     await dumpToolbarButtons(page);
     throw new Error('Không tìm thấy nút Export (đã thử hover đọc tooltip + tên/aria-label/title).');
   }
+  logger.info('Đã bấm icon Export.');
 
-  const clickedExportEmails = await clickFirstVisible([
-    page.getByText(/export emails?/i),
-    page.getByRole('menuitem', { name: /export emails?/i }),
-    page.getByRole('menuitem', { name: /email/i }),
-  ]);
-  if (!clickedExportEmails) {
-    logger.warn('Không thấy menu item "Export Emails" — có thể Export đã chạy thẳng không qua menu con.');
-  }
-
-  // Một số flow của Apollo có thêm dialog xác nhận trước khi export thật sự
-  const confirmExportBtn = page.getByRole('button', { name: /^export$/i }).last();
-  if (await confirmExportBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await confirmExportBtn.click();
-  }
+  // 4. Icon Export mở ra dialog "Export to CSV" (không phải menu) — mặc định đã chọn sẵn
+  // "Export all emails", chỉ cần bấm nút "Export records" để xác nhận.
+  const exportRecordsBtn = page.getByRole('button', { name: /export records/i }).first();
+  await exportRecordsBtn.waitFor({ state: 'visible', timeout: 15_000 });
+  await exportRecordsBtn.click();
   logger.info('Đã gửi yêu cầu export.');
 
-  // 4. Chờ Apollo xử lý xong (nút Download xuất hiện) rồi tải file
+  // 5. Chờ Apollo xử lý xong (nút Download xuất hiện trong dialog "CSV Export") rồi tải file
   logger.info('Đang chờ Apollo xử lý export, có thể mất vài phút với list lớn...');
-  const downloadBtn = page.getByRole('button', { name: /download/i }).first();
+  const downloadBtn = page.getByRole('button', { name: /^download$/i }).first();
   await downloadBtn.waitFor({ state: 'visible', timeout: 5 * 60_000 });
 
   const [download] = await Promise.all([page.waitForEvent('download'), downloadBtn.click()]);
