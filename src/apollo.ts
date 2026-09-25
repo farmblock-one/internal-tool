@@ -42,8 +42,12 @@ async function clickFirstVisible(
 async function clickButtonByTooltip(
   page: Page,
   tooltipPattern: RegExp,
-  maxCandidates = 60,
+  maxCandidates = 40,
 ): Promise<boolean> {
+  // Không đoán class/role của tooltip nữa (class của Apollo bị mã hoá ngẫu nhiên, không đoán
+  // được) — thay vào đó, hover xong chỉ kiểm tra xem CHỮ đó có hiện ra ở đâu trên trang không.
+  const textAppears = page.getByText(tooltipPattern);
+
   const all = page.locator('button, [role="button"]');
   const count = Math.min(await all.count(), maxCandidates);
   for (let i = 0; i < count; i++) {
@@ -54,15 +58,12 @@ async function clickButtonByTooltip(
     if (text) continue; // chỉ quan tâm nút icon-only (không có chữ hiển thị)
 
     await btn.hover().catch(() => {});
-    await page.waitForTimeout(350);
-    const tooltip: Locator = page.locator('[role="tooltip"], [class*="tooltip" i]').first();
-    const tooltipVisible = await tooltip.isVisible({ timeout: 600 }).catch(() => false);
-    if (tooltipVisible) {
-      const tooltipText = (await tooltip.textContent().catch(() => '')) ?? '';
-      if (tooltipPattern.test(tooltipText)) {
-        await btn.click();
-        return true;
-      }
+    await page.waitForTimeout(400);
+    const appeared = await textAppears.first().isVisible({ timeout: 500 }).catch(() => false);
+    await page.mouse.move(0, 0).catch(() => {}); // rời chuột để tooltip ẩn đi trước khi thử nút kế
+    if (appeared) {
+      await btn.click();
+      return true;
     }
   }
   return false;
@@ -93,27 +94,32 @@ async function dumpToolbarButtons(page: Page): Promise<void> {
       // Tìm phần tử chứa chữ "N selected" (vd "Clear 1783 selected") để xác định đúng thanh
       // công cụ bulk-action, rồi chỉ liệt kê nút BÊN TRONG nó — tránh lẫn hàng chục nút khác
       // (dropdown cột, sidebar...) nằm rải rác toàn trang khiến danh sách quá dài để xem.
-      const all = Array.from(document.querySelectorAll('body *'));
-      const marker = all.find(
-        (el) => /\d+\s+selected/i.test(el.textContent || '') && el.children.length <= 3,
-      );
+      const isRendered = (el: Element) => (el as HTMLElement).offsetParent !== null;
+      const all = Array.from(document.querySelectorAll('body *')).filter(isRendered);
+      const marker = all.find((el) => /\d+\s+selected/i.test(el.textContent || '') && el.children.length <= 3);
       let scope: Element = document.body;
       if (marker) {
         let el: Element = marker;
         for (let i = 0; i < 5 && el.parentElement; i++) el = el.parentElement;
         scope = el;
       }
-      const els = Array.from(scope.querySelectorAll('button, [role="button"]'));
-      return els.map((el, i) => ({
-        index: i,
-        text: (el.textContent ?? '').trim().slice(0, 40),
-        ariaLabel: el.getAttribute('aria-label'),
-        title: el.getAttribute('title'),
-        testId: el.getAttribute('data-testid'),
-        classes: (el.getAttribute('class') ?? '').slice(0, 100),
-      }));
+      const els = Array.from(scope.querySelectorAll('button, [role="button"]')).filter(isRendered);
+      return {
+        scopeFoundViaMarker: !!marker,
+        buttons: els.slice(0, 40).map((el, i) => ({
+          index: i,
+          text: (el.textContent ?? '').trim().slice(0, 40),
+          ariaLabel: el.getAttribute('aria-label'),
+          title: el.getAttribute('title'),
+          testId: el.getAttribute('data-testid'),
+          classes: (el.getAttribute('class') ?? '').slice(0, 100),
+        })),
+      };
     });
-    logger.error('DEBUG danh sách nút trong thanh bulk-action:', JSON.stringify(buttons, null, 2));
+    logger.error(
+      `DEBUG danh sách nút (tìm được vùng thanh công cụ: ${buttons.scopeFoundViaMarker}):`,
+      JSON.stringify(buttons.buttons, null, 2),
+    );
   } catch (evalErr) {
     logger.warn('Không lấy được danh sách nút debug:', evalErr);
   }
