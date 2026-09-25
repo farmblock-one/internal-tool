@@ -15,7 +15,14 @@ export async function openPersistentChrome(): Promise<BrowserContext> {
     channel: 'chrome',
     headless: config.headless,
     viewport: { width: 1440, height: 900 },
-    args: ['--disable-blink-features=AutomationControlled'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      // Chrome dùng /dev/shm cho renderer process — trên nhiều VM vùng này rất nhỏ (mặc định
+      // 64MB), dễ khiến Chrome crash khi render bảng dữ liệu lớn (vd danh sách ~2.000 contact
+      // của Apollo). Cờ này bảo Chrome dùng /tmp thay vì /dev/shm — cách khắc phục tiêu chuẩn
+      // khi chạy Chrome tự động trong VM/container.
+      '--disable-dev-shm-usage',
+    ],
   });
   return context;
 }
