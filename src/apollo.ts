@@ -94,12 +94,21 @@ async function clickButtonByTooltip(
  * Tìm locator đầu tiên (trong vài ứng viên khớp `candidates`) thực sự đang hiển thị — tránh
  * việc lấy nhầm 1 phần tử trùng văn bản nhưng đang ẩn (vd trạng thái "0 selected" mặc định).
  */
-async function findVisibleLocator(candidates: Locator, maxCheck = 10): Promise<Locator | null> {
-  const count = Math.min(await candidates.count(), maxCheck);
-  for (let i = 0; i < count; i++) {
-    const el = candidates.nth(i);
-    if (await el.isVisible().catch(() => false)) return el;
-  }
+async function findVisibleLocator(
+  candidates: Locator,
+  maxCheck = 10,
+  page?: Page,
+  retryMs = 8000,
+): Promise<Locator | null> {
+  const deadline = Date.now() + (page ? retryMs : 0);
+  do {
+    const count = Math.min(await candidates.count(), maxCheck);
+    for (let i = 0; i < count; i++) {
+      const el = candidates.nth(i);
+      if (await el.isVisible().catch(() => false)) return el;
+    }
+    if (page) await page.waitForTimeout(500);
+  } while (Date.now() < deadline);
   return null;
 }
 
@@ -143,8 +152,13 @@ async function dumpToolbarButtons(page: Page): Promise<void> {
       // Tìm phần tử chứa chữ "N selected" (vd "Clear 1783 selected") để xác định đúng thanh
       // công cụ bulk-action, rồi chỉ liệt kê nút BÊN TRONG nó — tránh lẫn hàng chục nút khác
       // (dropdown cột, sidebar...) nằm rải rác toàn trang khiến danh sách quá dài để xem.
-      const isRendered = (el: Element) => (el as HTMLElement).offsetParent !== null;
-      const all = Array.from(document.querySelectorAll('body *')).filter(isRendered);
+      // Không đặt tên riêng cho hàm lọc (vd "const isRendered = ...") vì công cụ build (esbuild)
+      // đôi khi chèn helper "__name" vào mà helper đó không tồn tại khi chạy trong trình duyệt
+      // qua page.evaluate — gây lỗi "ReferenceError: __name is not defined". Viết trực tiếp
+      // (inline) trong .filter() để tránh vấn đề này.
+      const all = Array.from(document.querySelectorAll('body *')).filter(
+        (el) => (el as HTMLElement).offsetParent !== null,
+      );
       const marker = all.find((el) => /\d+\s+selected/i.test(el.textContent || '') && el.children.length <= 3);
       let scope: Element = document.body;
       if (marker) {
@@ -152,7 +166,9 @@ async function dumpToolbarButtons(page: Page): Promise<void> {
         for (let i = 0; i < 5 && el.parentElement; i++) el = el.parentElement;
         scope = el;
       }
-      const els = Array.from(scope.querySelectorAll('button, [role="button"]')).filter(isRendered);
+      const els = Array.from(scope.querySelectorAll('button, [role="button"]')).filter(
+        (el) => (el as HTMLElement).offsetParent !== null,
+      );
       return {
         scopeFoundViaMarker: !!marker,
         buttons: els.slice(0, 40).map((el, i) => ({
@@ -253,6 +269,7 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
     if (await applyBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
       await applyBtn.click();
     }
+    await page.waitForTimeout(1500); // chờ UI cập nhật thanh "Clear N selected"
     logger.info('Đã chọn toàn bộ contact trong list.');
   } else {
     logger.warn('Không thấy dropdown "Select all" — có thể Apollo đã tự chọn hết, hoặc UI khác đi.');
@@ -261,7 +278,7 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   // 3. Bấm icon Export trong đúng thanh công cụ bulk-action (không phải nút chuông thông báo
   // hay icon nào khác trên trang — thu hẹp phạm vi tìm về đúng thanh công cụ trước).
   const clearSelectedCandidates = page.getByText(/clear\s+[\d,]+\s+selected/i);
-  const clearSelectedMarker = await findVisibleLocator(clearSelectedCandidates);
+  const clearSelectedMarker = await findVisibleLocator(clearSelectedCandidates, 10, page);
   const toolbarScope = clearSelectedMarker ? await findToolbarScope(clearSelectedMarker) : page.locator('body');
   if (!clearSelectedMarker) {
     logger.warn('Không thấy chữ "Clear N selected" — có thể chưa chọn được contact nào, hoặc UI khác đi.');
