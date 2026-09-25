@@ -46,8 +46,11 @@ async function clickButtonByTooltip(
   maxCandidates = 20,
 ): Promise<boolean> {
   // Không đoán class/role của tooltip nữa (class của Apollo bị mã hoá ngẫu nhiên, không đoán
-  // được) — thay vào đó, hover xong chỉ kiểm tra xem CHỮ đó có hiện ra ở đâu trên trang không.
-  const textAppears = page.getByText(tooltipPattern);
+  // được) — thay vào đó, hover xong kiểm tra xem CHỮ đó có hiện ra GẦN vị trí nút vừa hover
+  // không (tooltip luôn hiện sát cạnh nút) — tránh nhầm với menu/dropdown/dialog ở xa mà tình
+  // cờ cũng chứa chữ khớp (đã từng bị nhầm sang menu "Add records to list").
+  const textCandidates = page.getByText(tooltipPattern);
+  const PROXIMITY_PX = 120;
 
   const all = scope.locator('button, [role="button"]');
   const count = Math.min(await all.count(), maxCandidates);
@@ -60,9 +63,26 @@ async function clickButtonByTooltip(
 
     await btn.hover().catch(() => {});
     await page.waitForTimeout(400);
-    const appeared = await textAppears.first().isVisible({ timeout: 500 }).catch(() => false);
+
+    const btnBox = await btn.boundingBox().catch(() => null);
+    let matchedNearby = false;
+    if (btnBox) {
+      const textCount = Math.min(await textCandidates.count(), 5);
+      for (let j = 0; j < textCount; j++) {
+        const textEl = textCandidates.nth(j);
+        if (!(await textEl.isVisible().catch(() => false))) continue;
+        const textBox = await textEl.boundingBox().catch(() => null);
+        if (!textBox) continue;
+        const dx = Math.abs(textBox.x + textBox.width / 2 - (btnBox.x + btnBox.width / 2));
+        const dy = Math.abs(textBox.y + textBox.height / 2 - (btnBox.y + btnBox.height / 2));
+        if (dx < PROXIMITY_PX && dy < PROXIMITY_PX) {
+          matchedNearby = true;
+          break;
+        }
+      }
+    }
     await page.mouse.move(0, 0).catch(() => {}); // rời chuột để tooltip ẩn đi trước khi thử nút kế
-    if (appeared) {
+    if (matchedNearby) {
       await btn.click();
       return true;
     }
@@ -267,8 +287,28 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
 
   // 4. Icon Export mở ra dialog "Export to CSV" (không phải menu) — mặc định đã chọn sẵn
   // "Export all emails", chỉ cần bấm nút "Export records" để xác nhận.
-  const exportRecordsBtn = page.getByRole('button', { name: /export records/i }).first();
-  await exportRecordsBtn.waitFor({ state: 'visible', timeout: 15_000 });
+  let exportRecordsBtn = page.getByRole('button', { name: /export records/i }).first();
+  let exportRecordsVisible = await exportRecordsBtn.waitFor({ state: 'visible', timeout: 15_000 }).then(() => true).catch(() => false);
+
+  if (!exportRecordsVisible) {
+    // Lỡ bấm nhầm nút khác (vd dialog "Please review and confirm selections" của tính năng
+    // add-to-list) thì huỷ nó đi rồi thử bấm lại icon Export 1 lần nữa.
+    logger.warn('Không thấy dialog "Export to CSV" — có thể lỡ bấm nhầm nút khác, thử huỷ và bấm lại Export.');
+    const cancelBtn = page.getByRole('button', { name: /^cancel$/i }).first();
+    if (await cancelBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await cancelBtn.click();
+      await page.waitForTimeout(1000);
+    }
+    const retryClicked = await clickButtonByTooltip(page, toolbarScope, /^export$/i);
+    if (!retryClicked) {
+      await dumpToolbarButtons(page);
+      throw new Error('Bấm lại icon Export lần 2 vẫn thất bại.');
+    }
+    logger.info('Đã bấm lại icon Export (lần 2).');
+    exportRecordsBtn = page.getByRole('button', { name: /export records/i }).first();
+    await exportRecordsBtn.waitFor({ state: 'visible', timeout: 15_000 });
+  }
+
   await exportRecordsBtn.click();
   logger.info('Đã gửi yêu cầu export.');
 
