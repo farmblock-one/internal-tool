@@ -329,10 +329,24 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   await exportRecordsBtn.click();
   logger.info('Đã gửi yêu cầu export.');
 
-  // 5. Chờ Apollo xử lý xong (nút Download xuất hiện trong dialog "CSV Export") rồi tải file
+  // 5. Chờ Apollo xử lý xong (nút Download xuất hiện trong dialog "CSV Export") rồi tải file.
+  // Chờ theo từng đợt ngắn (thay vì 1 lần chờ dài 5 phút liên tục) và "động đậy" nhẹ trang giữa
+  // các đợt — tránh Chrome coi tab là "không hoạt động" trong thời gian dài rồi có hành vi lạ.
   logger.info('Đang chờ Apollo xử lý export, có thể mất vài phút với list lớn...');
   const downloadBtn = page.getByRole('button', { name: /^download$/i }).first();
-  await downloadBtn.waitFor({ state: 'visible', timeout: 5 * 60_000 });
+  const exportDeadline = Date.now() + 5 * 60_000;
+  let downloadBtnVisible = false;
+  while (Date.now() < exportDeadline) {
+    downloadBtnVisible = await downloadBtn
+      .waitFor({ state: 'visible', timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (downloadBtnVisible) break;
+    await page.mouse.move(10, 10).catch(() => {});
+  }
+  if (!downloadBtnVisible) {
+    throw new Error('Chờ quá 5 phút mà không thấy nút Download — kiểm tra thủ công tại Apollo.');
+  }
 
   const [download] = await Promise.all([page.waitForEvent('download'), downloadBtn.click()]);
 

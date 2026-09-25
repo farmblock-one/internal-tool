@@ -22,6 +22,14 @@ export async function openPersistentChrome(): Promise<BrowserContext> {
       // của Apollo). Cờ này bảo Chrome dùng /tmp thay vì /dev/shm — cách khắc phục tiêu chuẩn
       // khi chạy Chrome tự động trong VM/container.
       '--disable-dev-shm-usage',
+      // Chrome tự "throttle"/tạm ngưng tab khi không thấy tương tác trong thời gian dài —
+      // hành vi này đôi khi gây crash lạ khi tự động hoá phải đứng chờ lâu (vd chờ Apollo xử
+      // lý export). Các cờ này là chuẩn khuyến nghị khi chạy Chrome tự động để tắt hẳn kiểu
+      // "tối ưu cho tab nền" đó.
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
+      '--disable-features=CalculateNativeWinOcclusion',
     ],
   });
   return context;
