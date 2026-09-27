@@ -397,21 +397,42 @@ export async function importCsv(context: BrowserContext, filePath: string, downl
 }
 
 async function importCsvInner(page: Page, filePath: string): Promise<void> {
-  await page.goto('https://app.apollo.io/#/import', { waitUntil: 'domcontentloaded' });
+  // Không có URL trực tiếp tới trang import (đã thử /#/import — 404) — phải đi đúng đường:
+  // People -> nút "Import" (góc trên phải, mở dropdown) -> "CSV" -> trang "Import contacts /
+  // Import accounts" -> chọn file cho card "Import contacts" -> màn Column Mappings -> Import.
+  await page.goto('https://app.apollo.io/', { waitUntil: 'domcontentloaded' });
   await softWaitNetworkIdle(page);
 
+  const peopleLink = page.getByRole('link', { name: /^people$/i }).first();
+  if (await peopleLink.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await peopleLink.click();
+    await softWaitNetworkIdle(page);
+  }
+
+  const importNavBtn = page.getByRole('button', { name: /^import$/i }).first();
+  await importNavBtn.waitFor({ state: 'visible', timeout: 15_000 });
+  await importNavBtn.click();
+
+  const csvOption = page.getByText(/^csv$/i).first();
+  await csvOption.waitFor({ state: 'visible', timeout: 5_000 });
+  await csvOption.click();
+
+  // Trang có 2 card "Import contacts" (trái) / "Import accounts" (phải), mỗi card có 1
+  // input[type=file] ẩn riêng. Card "Import contacts" đứng trước trong DOM (đúng theo bố cục
+  // trái->phải) nên input đầu tiên là của nó. Set file thẳng vào input, không cần bấm nút
+  // "Select CSV File" hay đụng tới hộp thoại chọn file gốc của hệ điều hành.
   const fileInput = page.locator('input[type="file"]').first();
+  await fileInput.waitFor({ state: 'attached', timeout: 15_000 });
   await fileInput.setInputFiles(filePath);
   logger.info(`Đã chọn file để import: ${filePath}`);
 
-  // Apollo thường yêu cầu map cột (email -> Email, RESULT -> cột tuỳ chỉnh) trước khi import.
-  // Bước map cột phụ thuộc vào UI thực tế lúc đó nên KHÔNG tự động hoá ở đây — nếu Apollo tự
-  // nhận diện đúng cột thì nút Import dưới đây sẽ bấm được ngay; nếu không, cần thêm bước
-  // chọn mapping thủ công (hoặc mình bổ sung code sau khi biết chính xác UI mapping).
-  const importBtn = page.getByRole('button', { name: /^import$/i }).first();
-  await importBtn.waitFor({ state: 'visible', timeout: 60_000 });
-  await importBtn.click();
+  // Chờ qua màn "Column Mappings" — theo kiểm tra thực tế, Apollo tự nhận đúng cột email/RESULT
+  // (report "2 recognized"), các option khác (stage, owner...) giữ mặc định, chỉ cần bấm Import.
+  await page.getByText(/column mappings/i).waitFor({ state: 'visible', timeout: 30_000 });
+  const importSubmitBtn = page.getByRole('button', { name: /^import/i }).first();
+  await importSubmitBtn.waitFor({ state: 'visible', timeout: 15_000 });
+  await importSubmitBtn.click();
 
-  logger.info('Đã submit import CSV lên Apollo — vào Apollo kiểm tra lại kết quả import/mapping cột.');
+  logger.info('Đã submit import CSV lên Apollo.');
   await page.close();
 }
