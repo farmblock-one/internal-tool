@@ -1,71 +1,45 @@
-import { execSync } from 'node:child_process';
 import fs from 'node:fs';
-import https from 'node:https';
+import http from 'node:http';
 import path from 'node:path';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
 export interface PublicFileHandle {
-  /** URL công khai (https, thẳng vào IP của server này) trỏ tới file. */
+  /** URL công khai (https, cổng 443 chuẩn qua nginx reverse-proxy) trỏ tới file. */
   url: string;
   close: () => Promise<void>;
 }
 
-const CERT_DIR = path.resolve('.tls');
-const KEY_PATH = path.join(CERT_DIR, 'key.pem');
-const CERT_PATH = path.join(CERT_DIR, 'cert.pem');
-
-/** Tạo self-signed certificate 1 lần (dùng lại cho các lần chạy sau) bằng openssl có sẵn trên hệ thống. */
-function ensureSelfSignedCert(): void {
-  if (fs.existsSync(KEY_PATH) && fs.existsSync(CERT_PATH)) return;
-  fs.mkdirSync(CERT_DIR, { recursive: true });
-  logger.info('Đang tạo self-signed TLS certificate (chỉ 1 lần, dùng lại cho các lần sau)...');
-  execSync(
-    `openssl req -x509 -nodes -days 3650 -newkey rsa:2048 ` +
-      `-keyout "${KEY_PATH}" -out "${CERT_PATH}" -subj "/CN=${config.publicHost}"`,
-    { stdio: 'ignore' },
-  );
-}
-
 /**
  * Debounce yêu cầu file phải được host trên "server của chính bạn" (không chấp nhận Google
- * Drive/Dropbox...). Hàm này mở thẳng 1 HTTPS server (certificate tự ký) trên IP công khai của
- * chính VM này — không dùng phần mềm tunnel/proxy của bên thứ ba nào.
+ * Drive/Dropbox...) và có vẻ không chấp nhận cổng khác 443. Vì port 443 trên VM này đã có nginx
+ * dùng cho dịch vụ khác (n8n), hàm này chỉ mở 1 server HTTP thường ở localhost — nginx sẽ đảm
+ * nhận việc chấp nhận HTTPS ở cổng 443 (dùng tên miền riêng qua SNI) và chuyển tiếp vào đây.
+ * Xem README/hướng dẫn cấu hình nginx reverse-proxy tương ứng.
  *
- * Yêu cầu: đã mở port này trên firewall của VM (xem README), và đã set PUBLIC_HOST +
- * FILE_SERVE_PORT trong .env.
+ * Yêu cầu: đã cấu hình 1 server block nginx trỏ https://<PUBLIC_HOST> -> http://127.0.0.1:<FILE_SERVE_PORT>.
  */
 export async function servePubliclyOnOwnServer(filePath: string): Promise<PublicFileHandle> {
-  ensureSelfSignedCert();
   const fileName = path.basename(filePath);
   const port = config.fileServePort;
 
-  const server = https.createServer(
-    {
-      key: fs.readFileSync(KEY_PATH),
-      cert: fs.readFileSync(CERT_PATH),
-    },
-    (req, res) => {
-      if (req.url === `/${fileName}`) {
-        res.setHeader('Content-Type', 'text/csv');
-        fs.createReadStream(filePath).pipe(res);
-      } else {
-        res.statusCode = 404;
-        res.end('Not found');
-      }
-    },
-  );
+  const server = http.createServer((req, res) => {
+    if (req.url === `/${fileName}`) {
+      res.setHeader('Content-Type', 'text/csv');
+      fs.createReadStream(filePath).pipe(res);
+    } else {
+      res.statusCode = 404;
+      res.end('Not found');
+    }
+  });
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '0.0.0.0', () => resolve());
+    server.listen(port, '127.0.0.1', () => resolve());
   });
 
-  const url = `https://${config.publicHost}:${port}/${fileName}`;
-  logger.info(`Đã mở HTTPS server công khai tại: ${url}`);
-  logger.warn(
-    'Dùng certificate tự ký (self-signed) — nếu Debounce từ chối vì lỗi TLS, cần chuyển sang certificate hợp lệ (vd Let\'s Encrypt với 1 domain trỏ vào IP này).',
-  );
+  const url = `https://${config.publicHost}/${fileName}`;
+  logger.info(`Server nội bộ đã sẵn sàng tại 127.0.0.1:${port}, nginx phục vụ công khai tại: ${url}`);
 
   const close = async (): Promise<void> => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
