@@ -331,31 +331,41 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   logger.info('Đã gửi yêu cầu export.');
 
   // 5. Chờ Apollo xử lý xong rồi tải file. Đã xác nhận (qua nhiều lần crash lặp lại đúng 1 chỗ +
-  // loại trừ hết RAM/disk/OOM/zombie process/ulimit): Chrome bị kill ngay đúng lúc BẮT ĐẦU ghi
-  // file CSV thật xuống đĩa (Apollo tự trigger request tới link S3 có chữ ký tạm ngay khi xử lý
-  // xong, không cần đợi mình bấm Download). Thay vì để Chrome tự tải file đó (luôn crash), mình
-  // CHẶN hẳn request tới file CSV thật, lấy link của nó, rồi tự tải bằng Node — link S3 có chữ ký
-  // tạm này tự nó đủ để tải công khai, không cần cookie/session của trình duyệt. Chrome không bao
-  // giờ phải đụng vào file thật nữa nên loại bỏ hẳn nguyên nhân gây crash.
+  // loại trừ hết RAM/disk/OOM/zombie process/ulimit): Chrome bị kill ngay đúng lúc file CSV thật
+  // bắt đầu được request (Apollo tự trigger request tới link S3 có chữ ký tạm ngay khi xử lý
+  // xong, không cần đợi mình bấm Download). Thử CHẶN hẳn request đó bằng route.abort() không ăn
+  // thua (Chrome vẫn crash y hệt, chỉ là lỗi bị nuốt mất nên phải chờ hết 5 phút timeout mới biết)
+  // — có thể chính route.abort() giữa chừng 1 request kiểu "download" lại càng gây bất ổn định
+  // hơn. Giờ đổi cách: CHỈ NGHE (không chặn) request đó để lấy link, rồi lập tức tự tải bằng Node
+  // ở tiến trình riêng — không phụ thuộc Chrome nữa, nên dù Chrome có crash ngay sau đó cũng không
+  // ảnh hưởng gì (link đã nằm trong tay Node rồi). Đồng thời phát hiện page đóng đột ngột ngay lập
+  // tức thay vì lặng lẽ chờ hết 5 phút mới báo lỗi.
   logger.info('Đang chờ Apollo xử lý export, có thể mất vài phút với list lớn...');
   const csvUrlPattern = /amazonaws\.com\/.*csv_export.*\.csv/i;
   let capturedCsvUrl: string | null = null;
-  await page.route(csvUrlPattern, async (route) => {
-    capturedCsvUrl = route.request().url();
-    await route.abort();
+  page.on('request', (req) => {
+    if (!capturedCsvUrl && csvUrlPattern.test(req.url())) {
+      capturedCsvUrl = req.url();
+      logger.info('Đã bắt được request tới file CSV thật (chưa can thiệp gì, chỉ ghi nhận link).');
+    }
   });
 
   const downloadBtn = page.getByRole('button', { name: /^download$/i }).first();
   const exportDeadline = Date.now() + 5 * 60_000;
   while (Date.now() < exportDeadline && !capturedCsvUrl) {
+    if (page.isClosed()) {
+      throw new Error('Trang/browser đã đóng đột ngột trong lúc chờ Apollo xử lý export (trước khi bắt được link CSV).');
+    }
     const downloadBtnVisible = await downloadBtn
-      .waitFor({ state: 'visible', timeout: 15_000 })
+      .waitFor({ state: 'visible', timeout: 3_000 })
       .then(() => true)
       .catch(() => false);
     if (downloadBtnVisible) {
       await downloadBtn.click().catch(() => {});
     }
-    await page.mouse.move(10, 10).catch(() => {});
+    if (!capturedCsvUrl) {
+      await page.waitForTimeout(1000).catch(() => {});
+    }
   }
   if (!capturedCsvUrl) {
     throw new Error('Chờ quá 5 phút mà không bắt được link file CSV thật — kiểm tra thủ công tại Apollo.');
@@ -370,7 +380,9 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   await writeFile(filePath, Buffer.from(await res.arrayBuffer()));
   logger.info(`Đã tải file export Apollo về: ${filePath}`);
 
-  await page.close();
+  // Đã có file rồi — Chrome có crash ngay sau đó (không liên quan tới mình nữa) cũng không sao,
+  // page.close() lỡ lỗi vì trang đã chết thì bỏ qua, không để làm hỏng kết quả đã tải được.
+  await page.close().catch(() => {});
   return filePath;
 }
 
