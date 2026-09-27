@@ -58,6 +58,19 @@ export async function runFlow(apolloListUrl: string): Promise<FlowResult> {
 
   // 3. Verify email qua Debounce -> file có thêm cột RESULT
   const debounceResultPath = await verifyListViaApi(rawExportPath, PROCESSED_DIR);
+
+  return runFromDebounceResult(debounceResultPath, rawExportPath);
+}
+
+/**
+ * Chạy phần còn lại của luồng (bước 4 trở đi) từ 1 file kết quả Debounce ĐÃ CÓ SẴN trên đĩa —
+ * dùng để chạy lại/test riêng phần sau mà không phải export Apollo + verify Debounce lại từ đầu
+ * (2 bước đó tốn nhiều phút, không cần lặp lại mỗi lần chỉ sửa lỗi ở các bước sau).
+ */
+export async function runFromDebounceResult(
+  debounceResultPath: string,
+  rawExportPath = debounceResultPath,
+): Promise<FlowResult> {
   const debounceRows = readCsv(debounceResultPath);
 
   // 4. File để import ngược lại Apollo: chỉ giữ cột email + RESULT, TẤT CẢ các row

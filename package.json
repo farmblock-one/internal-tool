@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p .",
     "flow": "tsx src/run.ts",
+    "resume": "tsx src/resume.ts",
     "apollo:login": "tsx src/login-apollo.ts"
   },
   "dependencies": {
