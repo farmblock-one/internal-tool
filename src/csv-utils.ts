@@ -6,7 +6,10 @@ export type Row = Record<string, string>;
 
 export function readCsv(filePath: string): Row[] {
   const content = fs.readFileSync(filePath, 'utf-8');
-  return parse(content, { columns: true, skip_empty_lines: true }) as Row[];
+  // Nhiều dịch vụ (vd Debounce) xuất CSV có BOM ở đầu file — nếu không xử lý, tên cột đầu tiên
+  // sẽ dính thêm 1 ký tự vô hình (vd "﻿EMAIL" thay vì "EMAIL"), khiến so khớp tên cột thất
+  // bại dù nhìn ra màn hình thấy giống hệt nhau. `bom: true` tự bóc ký tự đó trước khi parse.
+  return parse(content, { columns: true, skip_empty_lines: true, bom: true }) as Row[];
 }
 
 export function writeCsv(filePath: string, rows: Row[]): void {
