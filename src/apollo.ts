@@ -396,6 +396,34 @@ export async function importCsv(context: BrowserContext, filePath: string, downl
   }
 }
 
+/**
+ * Đảm bảo 1 toggle (nhận diện qua accessible name gần nhãn, vd "Enrich emails") đang TẮT trước
+ * khi import — BẮT BUỘC (theo yêu cầu người dùng): nếu để bật, Apollo sẽ tốn credit thật để
+ * enrich lại email/phone, vô nghĩa vì email đã verify sẵn qua Debounce rồi. Bấm tắt nếu đang bật,
+ * rồi đọc lại `aria-checked` để xác nhận thật sự đã tắt — không đoán mò, không tự suy diễn nếu
+ * không đọc được trạng thái.
+ */
+async function ensureToggleOff(page: Page, labelPattern: RegExp, indexFallback: number): Promise<void> {
+  let toggle = page.getByRole('switch', { name: labelPattern }).first();
+  if (!(await toggle.isVisible({ timeout: 5000 }).catch(() => false))) {
+    logger.warn(`Không tìm thấy toggle theo tên "${labelPattern}", thử theo vị trí (index ${indexFallback}).`);
+    toggle = page.getByRole('switch').nth(indexFallback);
+  }
+  if (!(await toggle.isVisible({ timeout: 5000 }).catch(() => false))) {
+    throw new Error(`Không tìm thấy toggle "${labelPattern}" trên màn Column Mappings — dừng lại để tránh bấm Import khi chưa chắc đã tắt enrich (tốn credit thật).`);
+  }
+
+  const isOn = async () => (await toggle.getAttribute('aria-checked')) === 'true';
+  if (await isOn()) {
+    await toggle.click();
+    await page.waitForTimeout(300);
+  }
+  if (await isOn()) {
+    throw new Error(`Đã bấm nhưng toggle "${labelPattern}" vẫn đang BẬT — dừng lại, không bấm Import (tránh tốn credit thật).`);
+  }
+  logger.info(`Đã xác nhận toggle "${labelPattern}" đang TẮT.`);
+}
+
 async function importCsvInner(page: Page, filePath: string): Promise<void> {
   // Không có URL trực tiếp tới trang import (đã thử /#/import — 404) — phải đi đúng đường:
   // People -> nút "Import" (góc trên phải, mở dropdown) -> "CSV" -> trang "Import contacts /
@@ -429,6 +457,12 @@ async function importCsvInner(page: Page, filePath: string): Promise<void> {
   // Chờ qua màn "Column Mappings" — theo kiểm tra thực tế, Apollo tự nhận đúng cột email/RESULT
   // (report "2 recognized"), các option khác (stage, owner...) giữ mặc định, chỉ cần bấm Import.
   await page.getByText(/column mappings/i).waitFor({ state: 'visible', timeout: 30_000 });
+
+  // BẮT BUỘC tắt 2 toggle này trước khi import — không thì Apollo tốn credit enrich lại email/
+  // phone dù đã verify sẵn qua Debounce rồi (theo đúng yêu cầu, đây là bước không được bỏ qua).
+  await ensureToggleOff(page, /enrich emails/i, 0);
+  await ensureToggleOff(page, /enrich phone numbers/i, 1);
+
   const importSubmitBtn = page.getByRole('button', { name: /^import/i }).first();
   await importSubmitBtn.waitFor({ state: 'visible', timeout: 15_000 });
   await importSubmitBtn.click();
