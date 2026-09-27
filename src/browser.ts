@@ -1,5 +1,6 @@
 import { chromium, type BrowserContext } from 'playwright';
 import { config } from './config.js';
+import { logger } from './logger.js';
 
 /**
  * Mở Google Chrome (không phải Chromium đi kèm Playwright) với 1 profile lưu trên đĩa,
@@ -30,7 +31,19 @@ export async function openPersistentChrome(): Promise<BrowserContext> {
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
       '--disable-features=CalculateNativeWinOcclusion',
+      // Ghi log chi tiết nội bộ của Chrome ra file trong thư mục profile — để biết chính xác
+      // lý do khi Chrome tự thoát/crash mà không để lại dấu vết gì trong log hệ thống.
+      '--enable-logging',
+      '--v=1',
     ],
   });
+
+  // Bắt sự kiện crash/đóng ngay khi xảy ra — nhanh và rõ ràng hơn nhiều so với đào log hệ thống.
+  context.on('close', () => logger.warn('SỰ KIỆN: browser context đã đóng.'));
+  context.on('page', (page) => {
+    page.on('crash', () => logger.error('SỰ KIỆN: 1 trang bị CRASH (renderer process chết).'));
+    page.on('close', () => logger.warn('SỰ KIỆN: 1 trang đã đóng.'));
+  });
+
   return context;
 }
