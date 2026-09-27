@@ -2,6 +2,7 @@ import path from 'node:path';
 import { chromium, type BrowserContext } from 'playwright';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { cleanupChromeProfile } from './chrome-cleanup.js';
 
 /**
  * Mở Google Chrome (không phải Chromium đi kèm Playwright) với 1 profile lưu trên đĩa,
@@ -13,6 +14,10 @@ import { logger } from './logger.js';
  * hoặc cài google-chrome-stable qua apt.
  */
 export async function openPersistentChrome(): Promise<BrowserContext> {
+  // Dọn sạch mọi tiến trình Chrome cũ (zombie từ lần crash trước) còn giữ khoá trên profile này
+  // trước khi mở mới — 2 Chrome tranh nhau 1 profile là nguyên nhân đã xác nhận gây crash lặp lại.
+  cleanupChromeProfile(config.chromeUserDataDir);
+
   const context = await chromium.launchPersistentContext(config.chromeUserDataDir, {
     channel: 'chrome',
     headless: config.headless,
