@@ -42,6 +42,12 @@ export async function openPersistentChrome(): Promise<BrowserContext> {
       // Chặn hẳn mọi popup/permission-prompt xin quyền gửi thông báo hệ thống — 1 dạng UI gốc
       // hệ điều hành khác (giống hộp thoại Save As) có thể gây crash khi không có window manager.
       '--disable-notifications',
+      // Xvfb không có GPU thật — để Chrome cố dùng GPU thật (hoặc chuyển qua lại) dưới Xvfb là
+      // nguyên nhân crash renderer rất phổ biến khi chạy tự động hoá trong VM. Ép hẳn về phần
+      // mềm (SwiftShader) để loại trừ khả năng này thay vì để Chrome tự dò GPU rồi crash.
+      '--disable-gpu',
+      '--use-gl=swiftshader',
+      '--disable-software-rasterizer',
       // Ghi log chi tiết nội bộ của Chrome ra file trong thư mục profile — để biết chính xác
       // lý do khi Chrome tự thoát/crash mà không để lại dấu vết gì trong log hệ thống.
       '--enable-logging',

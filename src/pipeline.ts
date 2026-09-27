@@ -7,6 +7,7 @@ import { readCsv, writeCsv, onlyEmailAndResult, filterByResult } from './csv-uti
 import { uploadToDrive } from './drive.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { captureCrashDiagnostics } from './diagnostics.js';
 
 const DOWNLOAD_DIR = path.resolve('data/downloads');
 const PROCESSED_DIR = path.resolve('data/processed');
@@ -38,6 +39,12 @@ async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts
     } catch (err) {
       lastErr = err;
       logger.warn(`Export Apollo lần ${attempt} thất bại: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        const diagPath = captureCrashDiagnostics(`export-attempt${attempt}`);
+        logger.warn(`Đã lưu thông tin chẩn đoán (RAM, log OOM, chrome_debug.log...) tại: ${diagPath}`);
+      } catch (diagErr) {
+        logger.warn(`Không chụp được thông tin chẩn đoán: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`);
+      }
     } finally {
       await context.close().catch(() => {});
     }
