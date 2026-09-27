@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { chromium, type BrowserContext } from 'playwright';
 import { config } from './config.js';
 import { logger } from './logger.js';
@@ -16,6 +17,13 @@ export async function openPersistentChrome(): Promise<BrowserContext> {
     channel: 'chrome',
     headless: config.headless,
     viewport: { width: 1440, height: 900 },
+    // Log Chrome nội bộ cho thấy crash xảy ra ĐÚNG lúc bắt đầu tải file xuống — khả năng cao vì
+    // không chỉ rõ nơi lưu, Chrome cố hiện hộp thoại "Save As" gốc của hệ điều hành, nhưng Xvfb
+    // không có window manager nên hộp thoại đó không hiện được đúng cách. Khai báo rõ
+    // acceptDownloads + downloadsPath để Playwright tự quản lý tải file qua CDP, không để Chrome
+    // tự hiện UI tải file nào cả.
+    acceptDownloads: true,
+    downloadsPath: path.resolve('data/downloads'),
     args: [
       '--disable-blink-features=AutomationControlled',
       // Chrome dùng /dev/shm cho renderer process — trên nhiều VM vùng này rất nhỏ (mặc định
