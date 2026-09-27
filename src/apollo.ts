@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { logger } from './logger.js';
 
@@ -329,29 +330,44 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   await exportRecordsBtn.click();
   logger.info('Đã gửi yêu cầu export.');
 
-  // 5. Chờ Apollo xử lý xong (nút Download xuất hiện trong dialog "CSV Export") rồi tải file.
-  // Chờ theo từng đợt ngắn (thay vì 1 lần chờ dài 5 phút liên tục) và "động đậy" nhẹ trang giữa
-  // các đợt — tránh Chrome coi tab là "không hoạt động" trong thời gian dài rồi có hành vi lạ.
+  // 5. Chờ Apollo xử lý xong rồi tải file. Đã xác nhận (qua nhiều lần crash lặp lại đúng 1 chỗ +
+  // loại trừ hết RAM/disk/OOM/zombie process/ulimit): Chrome bị kill ngay đúng lúc BẮT ĐẦU ghi
+  // file CSV thật xuống đĩa (Apollo tự trigger request tới link S3 có chữ ký tạm ngay khi xử lý
+  // xong, không cần đợi mình bấm Download). Thay vì để Chrome tự tải file đó (luôn crash), mình
+  // CHẶN hẳn request tới file CSV thật, lấy link của nó, rồi tự tải bằng Node — link S3 có chữ ký
+  // tạm này tự nó đủ để tải công khai, không cần cookie/session của trình duyệt. Chrome không bao
+  // giờ phải đụng vào file thật nữa nên loại bỏ hẳn nguyên nhân gây crash.
   logger.info('Đang chờ Apollo xử lý export, có thể mất vài phút với list lớn...');
+  const csvUrlPattern = /amazonaws\.com\/.*csv_export.*\.csv/i;
+  let capturedCsvUrl: string | null = null;
+  await page.route(csvUrlPattern, async (route) => {
+    capturedCsvUrl = route.request().url();
+    await route.abort();
+  });
+
   const downloadBtn = page.getByRole('button', { name: /^download$/i }).first();
   const exportDeadline = Date.now() + 5 * 60_000;
-  let downloadBtnVisible = false;
-  while (Date.now() < exportDeadline) {
-    downloadBtnVisible = await downloadBtn
+  while (Date.now() < exportDeadline && !capturedCsvUrl) {
+    const downloadBtnVisible = await downloadBtn
       .waitFor({ state: 'visible', timeout: 15_000 })
       .then(() => true)
       .catch(() => false);
-    if (downloadBtnVisible) break;
+    if (downloadBtnVisible) {
+      await downloadBtn.click().catch(() => {});
+    }
     await page.mouse.move(10, 10).catch(() => {});
   }
-  if (!downloadBtnVisible) {
-    throw new Error('Chờ quá 5 phút mà không thấy nút Download — kiểm tra thủ công tại Apollo.');
+  if (!capturedCsvUrl) {
+    throw new Error('Chờ quá 5 phút mà không bắt được link file CSV thật — kiểm tra thủ công tại Apollo.');
   }
 
-  const [download] = await Promise.all([page.waitForEvent('download'), downloadBtn.click()]);
-
+  logger.info('Đã bắt được link file CSV thật, đang tự tải bằng Node (không qua Chrome)...');
+  const res = await fetch(capturedCsvUrl);
+  if (!res.ok) {
+    throw new Error(`Tải file CSV từ Apollo thất bại: HTTP ${res.status}`);
+  }
   const filePath = path.join(downloadDir, `apollo-export-${Date.now()}.csv`);
-  await download.saveAs(filePath);
+  await writeFile(filePath, Buffer.from(await res.arrayBuffer()));
   logger.info(`Đã tải file export Apollo về: ${filePath}`);
 
   await page.close();
