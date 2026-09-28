@@ -7,14 +7,17 @@
     "build": "tsc -p .",
     "flow": "tsx src/run.ts",
     "resume": "tsx src/resume.ts",
-    "apollo:login": "tsx src/login-apollo.ts"
+    "risky": "tsx src/process-risky.ts",
+    "apollo:login": "tsx src/login-apollo.ts",
+    "teams:login": "tsx src/login-teams.ts"
   },
   "dependencies": {
     "csv-parse": "^5.5.6",
     "csv-stringify": "^6.5.1",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",
-    "playwright": "^1.48.0"
+    "playwright": "^1.48.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
