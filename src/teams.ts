@@ -1,4 +1,4 @@
-import type { BrowserContext, Request } from 'playwright';
+import type { BrowserContext, Locator, Page, Request } from 'playwright';
 import { logger } from './logger.js';
 
 const SEARCH_USERS_URL_PATTERN = /searchUsers/i;
@@ -33,6 +33,28 @@ function buildCurlCommand(url: string, method: string, headers: Record<string, s
 }
 
 /**
+ * Teams là SPA nặng, tải xong DOM rồi vẫn còn dựng UI thêm 1 lúc — `isVisible()` chỉ kiểm tra
+ * tức thì tại thời điểm gọi (KHÔNG tự chờ/poll như `waitFor`), nên gọi ngay sau khi trang vừa
+ * "domcontentloaded" gần như luôn ra false dù phần tử sắp xuất hiện. Dùng `waitFor` (có polling
+ * thật) cho từng candidate, trả về candidate đầu tiên xuất hiện trong `timeoutMs`.
+ */
+async function findVisibleLocator(candidates: Locator[], timeoutMs: number): Promise<Locator | null> {
+  for (const candidate of candidates) {
+    const found = await candidate
+      .waitFor({ state: 'visible', timeout: timeoutMs })
+      .then(() => true)
+      .catch(() => false);
+    if (found) return candidate;
+  }
+  return null;
+}
+
+/** Chờ "cho có" — Teams là SPA, mạng gần như không bao giờ thực sự "idle". */
+async function softWaitNetworkIdle(page: Page, timeout = 8000): Promise<void> {
+  await page.waitForLoadState('networkidle', { timeout }).catch(() => {});
+}
+
+/**
  * Mở Teams, search 1 email bất kỳ để trigger request tới "searchUsers", bắt lại request đó
  * (URL + method + toàn bộ header, gồm cả cookie/authorization) rồi dựng thành 1 lệnh cURL —
  * dùng để dán vào form upload của meetscript.io (form đó cần đúng session Teams còn hiệu lực).
@@ -52,24 +74,21 @@ export async function fetchTeamsSearchCurl(
     requestPromise.catch(() => {});
 
     await page.goto('https://teams.live.com/v2/', { waitUntil: 'domcontentloaded' });
+    await softWaitNetworkIdle(page);
 
     // Chưa chắc đúng selector ô tìm kiếm thật của Teams (chỉ đoán từ ảnh chụp màn hình kết quả
-    // tìm kiếm, chưa thấy màn hình TRƯỚC khi search) — thử vài cách nhận diện phổ biến.
-    const searchBoxCandidates = [
-      page.getByPlaceholder(/search/i),
-      page.getByRole('searchbox'),
-      page.locator('[aria-label*="search" i]'),
-      page.locator('input[type="search"]'),
-      page.locator('input[type="text"]'),
-    ];
-    let searchBox = null;
-    for (const candidate of searchBoxCandidates) {
-      const loc = candidate.first();
-      if (await loc.isVisible({ timeout: 5000 }).catch(() => false)) {
-        searchBox = loc;
-        break;
-      }
-    }
+    // tìm kiếm, chưa thấy màn hình TRƯỚC khi search) — thử vài cách nhận diện phổ biến, mỗi cách
+    // có chờ (poll) thật sự chứ không check tức thì.
+    const searchBox = await findVisibleLocator(
+      [
+        page.getByPlaceholder(/search/i).first(),
+        page.getByRole('searchbox').first(),
+        page.locator('[aria-label*="search" i]').first(),
+        page.locator('input[type="search"]').first(),
+        page.locator('input[type="text"]').first(),
+      ],
+      10_000,
+    );
     if (!searchBox) {
       throw new Error('Không tìm thấy ô tìm kiếm trên Teams (đã thử placeholder/role/aria-label/input).');
     }
