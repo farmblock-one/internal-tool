@@ -46,7 +46,10 @@ export async function fetchGmailLookupCurl(
       throw new Error('Không tìm thấy ô tìm kiếm trên Gmail (đã thử placeholder/role/name=q/aria-label).');
     }
     await searchBox.click();
-    await searchBox.fill(probeEmail);
+    // Gợi ý autocomplete người nhận của Gmail có thể chỉ lắng nghe sự kiện gõ phím thật, không
+    // phản ứng với fill() (gán giá trị thẳng vào input) — gõ từng ký tự thật để chắc chắn trigger
+    // đúng request lookup, giống hệt cách người dùng gõ tay.
+    await searchBox.pressSequentially(probeEmail, { delay: 80 });
 
     const request = await requestPromise;
     const headers = await request.allHeaders();
