@@ -35,6 +35,13 @@ export function onlyEmailAndResult(rows: Row[]): Row[] {
   return rows.map((r) => ({ email: r[emailCol], RESULT: r[resultCol] }));
 }
 
+/** Lấy ra danh sách email (chỉ giá trị, không kèm cột nào khác) — dùng cho file Excel upload Risky. */
+export function extractEmails(rows: Row[]): string[] {
+  if (rows.length === 0) return [];
+  const emailCol = findColumn(rows, ['email']);
+  return rows.map((r) => r[emailCol]);
+}
+
 /** Chỉ giữ lại các row có RESULT nằm trong danh sách `keep` (so sánh không phân biệt hoa/thường). */
 export function filterByResult(rows: Row[], keep: string[]): Row[] {
   const resultCol = findColumn(rows, ['result']);

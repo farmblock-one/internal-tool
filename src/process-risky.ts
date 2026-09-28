@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
-import { readCsv } from './csv-utils.js';
-import { writeXlsx } from './xlsx-utils.js';
+import { readCsv, extractEmails } from './csv-utils.js';
+import { writeRiskyExcel } from './xlsx-utils.js';
 import { fetchTeamsSearchCurl } from './teams.js';
 import { uploadRiskyToMeetscript } from './meetscript.js';
 import { logger } from './logger.js';
@@ -17,9 +17,10 @@ async function main() {
   }
 
   const rows = readCsv(riskyCsvPath);
+  const emails = extractEmails(rows);
   const excelPath = path.join(PROCESSED_DIR, `risky-${Date.now()}.xlsx`);
-  writeXlsx(excelPath, rows);
-  logger.info(`Đã đổi file Risky sang Excel: ${excelPath}`);
+  writeRiskyExcel(excelPath, emails);
+  logger.info(`Đã đổi file Risky sang Excel (chỉ cột email + 2 sheet trống): ${excelPath}`);
 
   const context = await openPersistentChrome();
   try {
