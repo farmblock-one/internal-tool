@@ -31,11 +31,35 @@ export async function uploadRiskyToMeetscript(
     await fileInput.waitFor({ state: 'attached', timeout: 15_000 });
     await fileInput.setInputFiles(excelFilePath);
 
+    // Chưa biết chính xác endpoint backend của meetscript.io gọi khi bấm Upload — ghi lại MỌI
+    // response không phải file tĩnh (js/css/ảnh/font) trong lúc submit, để biết request thật sự
+    // có được gửi đi không và server trả về gì (thay vì chỉ tin là bấm được nút là xong — lần
+    // trước đã bấm "thành công" nhưng thực chất không có request hợp lệ nào tới nơi).
+    const staticAssetPattern = /\.(js|css|png|jpe?g|svg|gif|woff2?|ico)(\?|$)/i;
+    const responseLogs: string[] = [];
+    page.on('response', (res) => {
+      if (!staticAssetPattern.test(res.url())) {
+        responseLogs.push(`${res.status()} ${res.request().method()} ${res.url()}`);
+      }
+    });
+
     const uploadBtn = page.getByRole('button', { name: /^upload data$/i }).first();
     await uploadBtn.waitFor({ state: 'visible', timeout: 15_000 });
     await uploadBtn.click();
 
-    logger.info('Đã submit upload file Risky lên meetscript.io.');
+    // Chờ 1 chút cho request thật (nếu có) và thông báo kết quả (toast/text) kịp xuất hiện, rồi
+    // LUÔN chụp ảnh màn hình (không chỉ lúc lỗi) — cần bằng chứng thực tế xem có thành công thật
+    // hay không, không tự suy diễn chỉ từ việc bấm nút không báo lỗi.
+    await page.waitForTimeout(5000);
+    const resultPath = `${downloadDir}/result-meetscript-${Date.now()}.png`;
+    await page.screenshot({ path: resultPath, fullPage: true }).catch(() => {});
+
+    logger.info(`Đã bấm Upload Data — ảnh kết quả: ${resultPath}`);
+    if (responseLogs.length === 0) {
+      logger.warn('KHÔNG thấy request nào (ngoài file tĩnh) được gửi đi sau khi bấm Upload Data — có thể nút không thực sự submit gì.');
+    } else {
+      logger.info(`Các response ghi nhận được sau khi bấm Upload Data:\n${responseLogs.join('\n')}`);
+    }
   } catch (err) {
     const debugPath = `${downloadDir}/debug-meetscript-${Date.now()}.png`;
     await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
