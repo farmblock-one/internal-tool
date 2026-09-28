@@ -62,7 +62,7 @@ async function softWaitNetworkIdle(page: Page, timeout = 8000): Promise<void> {
 export async function fetchTeamsSearchCurl(
   context: BrowserContext,
   downloadDir: string,
-  probeEmail = 'test@example.com',
+  probeEmail = 'thanh@nscsoftware.com',
 ): Promise<string> {
   const page = await context.newPage();
   try {
@@ -76,11 +76,13 @@ export async function fetchTeamsSearchCurl(
     await page.goto('https://teams.live.com/v2/', { waitUntil: 'domcontentloaded' });
     await softWaitNetworkIdle(page);
 
-    // Chưa chắc đúng selector ô tìm kiếm thật của Teams (chỉ đoán từ ảnh chụp màn hình kết quả
-    // tìm kiếm, chưa thấy màn hình TRƯỚC khi search) — thử vài cách nhận diện phổ biến, mỗi cách
-    // có chờ (poll) thật sự chứ không check tức thì.
+    // Ô search thật có placeholder "Look for people, messages, files and more" — KHÔNG chứa chữ
+    // "search", nên thử theo placeholder chính xác này TRƯỚC (tránh bấm nhầm 1 icon search nhỏ
+    // khác ở sidebar cũng khớp regex /search/i nhưng lại mở ra CHÍNH ô này, khiến fill() sau đó
+    // nhắm nhầm vào locator cũ). Giữ các cách đoán chung ở dưới làm fallback.
     const searchBox = await findVisibleLocator(
       [
+        page.getByPlaceholder(/look for people/i).first(),
         page.getByPlaceholder(/search/i).first(),
         page.getByRole('searchbox').first(),
         page.locator('[aria-label*="search" i]').first(),
