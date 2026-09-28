@@ -21,7 +21,9 @@ async function softWaitNetworkIdle(page: Page, timeout = 8000): Promise<void> {
 export async function fetchGmailLookupCurl(
   context: BrowserContext,
   downloadDir: string,
-  probeEmail = 'thanh@nscsoftware.com',
+  // Dùng 1 email NGOÀI tổ chức (không phải @nscsoftware.com) — email cùng nội bộ dễ không trigger
+  // đúng request "Lookup" (có thể do Gmail đã biết sẵn contact nội bộ, không cần tra cứu ngoài).
+  probeEmail = 'anna.nguyen@payreq.com',
 ): Promise<string> {
   const page = await context.newPage();
   try {
