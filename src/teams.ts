@@ -19,23 +19,29 @@ function isHeaderToSkip(name: string): boolean {
 }
 
 /**
- * Dựng lại 1 request Playwright thành lệnh cURL (bash) — tương đương "Copy as cURL (bash)" của
- * Chrome DevTools. `searchUsers` là request POST kèm body (nội dung tìm kiếm) — thiếu `--data-raw`
- * thì cURL gửi đi rỗng/không hợp lệ dù headers/URL đúng hết (đã bỏ sót ở bản đầu, sửa lại đây).
+ * Dựng lại 1 request Playwright thành lệnh cURL (bash), theo ĐÚNG định dạng 1 cURL mẫu hợp lệ
+ * được xác nhận thật (không phải kiểu "Copy as cURL" mặc định của Chrome):
+ *   - Dùng cờ `--url '...'` thay vì URL nằm ngay sau `curl` — nếu bên nhận tự parse text tìm cờ
+ *     `--url` thì kiểu cũ (URL không có cờ) sẽ không nhận ra được.
+ *   - KHÔNG thêm `-X POST` khi có `--data-raw` (curl tự hiểu là POST) và KHÔNG có `--compressed`
+ *     ở cuối — mẫu hợp lệ không có cả hai, thêm vào là thừa/khác định dạng.
+ *   - Header có giá trị rỗng dùng cú pháp đặc biệt `-H 'tên;'` (dấu `;` thay `:`) — đúng cách
+ *     Chrome/Firefox xuất khi header gốc rỗng, không phải `-H 'tên: '`.
  */
 function buildCurlCommand(url: string, method: string, headers: Record<string, string>, postData: string | null): string {
-  const lines = [`curl ${shellEscapeSingleQuoted(url)}`];
-  if (method.toUpperCase() !== 'GET') {
-    lines.push(`  -X ${shellEscapeSingleQuoted(method.toUpperCase())}`);
+  const lines = [`curl --url ${shellEscapeSingleQuoted(url)}`];
+  const methodUpper = method.toUpperCase();
+  const isPostWithData = methodUpper === 'POST' && !!postData;
+  if (methodUpper !== 'GET' && !isPostWithData) {
+    lines.push(`  -X ${shellEscapeSingleQuoted(methodUpper)}`);
   }
   for (const [name, value] of Object.entries(headers)) {
     if (isHeaderToSkip(name)) continue;
-    lines.push(`  -H ${shellEscapeSingleQuoted(`${name}: ${value}`)}`);
+    lines.push(`  -H ${shellEscapeSingleQuoted(value === '' ? `${name};` : `${name}: ${value}`)}`);
   }
   if (postData) {
     lines.push(`  --data-raw ${shellEscapeSingleQuoted(postData)}`);
   }
-  lines.push('  --compressed');
   return lines.join(' \\\n');
 }
 
