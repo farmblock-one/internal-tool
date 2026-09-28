@@ -3,6 +3,7 @@ import { openPersistentChrome } from './browser.js';
 import { readCsv, extractEmails } from './csv-utils.js';
 import { writeRiskyExcel } from './xlsx-utils.js';
 import { fetchTeamsSearchCurl } from './teams.js';
+import { fetchGmailLookupCurl } from './gmail.js';
 import { uploadRiskyToMeetscript } from './meetscript.js';
 import { logger } from './logger.js';
 
@@ -24,8 +25,11 @@ async function main() {
 
   const context = await openPersistentChrome();
   try {
-    const curlCommand = await fetchTeamsSearchCurl(context, DOWNLOAD_DIR);
-    await uploadRiskyToMeetscript(context, curlCommand, excelPath, DOWNLOAD_DIR);
+    const teamsCurl = await fetchTeamsSearchCurl(context, DOWNLOAD_DIR);
+    await uploadRiskyToMeetscript(context, teamsCurl, excelPath, DOWNLOAD_DIR, 'TEAM');
+
+    const gmailCurl = await fetchGmailLookupCurl(context, DOWNLOAD_DIR);
+    await uploadRiskyToMeetscript(context, gmailCurl, excelPath, DOWNLOAD_DIR, 'GOOGLE');
   } finally {
     await context.close();
   }

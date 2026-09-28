@@ -1,0 +1,68 @@
+import type { BrowserContext, Page, Request } from 'playwright';
+import { logger } from './logger.js';
+import { buildCurlCommand, findVisibleLocator } from './curl-utils.js';
+
+// Có cả request "Lookup" (OPTIONS, preflight) và request "Lookup" thật (thường là POST) — CHỈ bắt
+// cái thật, bỏ qua OPTIONS, nếu không dễ bắt nhầm cái preflight (không có auth header đầy đủ).
+function isRealLookupRequest(req: Request): boolean {
+  return /lookup/i.test(req.url()) && req.method().toUpperCase() !== 'OPTIONS';
+}
+
+/** Chờ "cho có" — Gmail cũng là SPA nặng, mạng gần như không bao giờ thực sự "idle". */
+async function softWaitNetworkIdle(page: Page, timeout = 8000): Promise<void> {
+  await page.waitForLoadState('networkidle', { timeout }).catch(() => {});
+}
+
+/**
+ * Mở Gmail, search 1 email bất kỳ để trigger request "Lookup" (autocomplete gợi ý người nhận),
+ * bắt lại request đó rồi dựng thành 1 lệnh cURL — dùng cho tab GOOGLE của form upload
+ * meetscript.io (cùng khái niệm với fetchTeamsSearchCurl ở teams.ts, khác trang/endpoint).
+ */
+export async function fetchGmailLookupCurl(
+  context: BrowserContext,
+  downloadDir: string,
+  probeEmail = 'thanh@nscsoftware.com',
+): Promise<string> {
+  const page = await context.newPage();
+  try {
+    const requestPromise: Promise<Request> = page.waitForRequest(isRealLookupRequest, { timeout: 30_000 });
+    // Xem giải thích ở teams.ts: gắn catch rỗng ngay để Node không crash vì unhandled rejection
+    // nếu promise này timeout trước khi mình thật sự await nó ở dưới.
+    requestPromise.catch(() => {});
+
+    await page.goto('https://mail.google.com/', { waitUntil: 'domcontentloaded' });
+    await softWaitNetworkIdle(page);
+
+    const searchBox = await findVisibleLocator(
+      [
+        page.getByPlaceholder(/search mail/i).first(),
+        page.getByRole('combobox', { name: /search mail/i }).first(),
+        page.locator('input[name="q"]').first(),
+        page.locator('input[aria-label*="search" i]').first(),
+      ],
+      15_000,
+    );
+    if (!searchBox) {
+      throw new Error('Không tìm thấy ô tìm kiếm trên Gmail (đã thử placeholder/role/name=q/aria-label).');
+    }
+    await searchBox.click();
+    await searchBox.fill(probeEmail);
+
+    const request = await requestPromise;
+    const headers = await request.allHeaders();
+    const postData = request.postData();
+    const curl = buildCurlCommand(request.url(), request.method(), headers, postData);
+    logger.info(
+      `Đã bắt được request "Lookup" từ Gmail (${request.method()} ${request.url().slice(0, 80)}..., ` +
+        `body: ${postData ? `${postData.length} ký tự` : '(không có)'}).`,
+    );
+    return curl;
+  } catch (err) {
+    const debugPath = `${downloadDir}/debug-gmail-${Date.now()}.png`;
+    await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
+    logger.error(`Lỗi khi lấy cURL từ Gmail — đã lưu ảnh debug: ${debugPath}`);
+    throw err;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}

@@ -2,28 +2,27 @@ import type { BrowserContext } from 'playwright';
 import { logger } from './logger.js';
 
 /**
- * Mở seacher.meetscript.io, đảm bảo đang ở tab "TEAM", dán lệnh cURL (lấy từ Teams) + chọn file
- * Excel chứa các lead Risky, rồi bấm "Upload Data".
- *
- * LƯU Ý: chưa biết chính xác trang có báo thành công/thất bại rõ ràng thế nào (chưa test thật
- * lần nào) — nếu có lỗi, xem ảnh debug được lưu lại cùng thư mục downloads.
+ * Mở seacher.meetscript.io, chọn đúng tab (TEAM hoặc GOOGLE), dán lệnh cURL tương ứng + chọn file
+ * Excel chứa các lead Risky, rồi bấm "Upload Data". Gọi 2 lần riêng (1 lần cho TEAM, 1 lần cho
+ * GOOGLE) — mỗi lần tự mở trang mới từ đầu, không phụ thuộc trạng thái lẫn nhau.
  */
 export async function uploadRiskyToMeetscript(
   context: BrowserContext,
   curlCommand: string,
   excelFilePath: string,
   downloadDir: string,
+  tab: 'TEAM' | 'GOOGLE' = 'TEAM',
 ): Promise<void> {
   const page = await context.newPage();
   try {
     await page.goto('https://seacher.meetscript.io/', { waitUntil: 'domcontentloaded' });
 
-    const teamTabBtn = page.getByRole('button', { name: /^team$/i }).first();
-    if (await teamTabBtn.isVisible({ timeout: 10_000 }).catch(() => false)) {
-      await teamTabBtn.click();
+    const tabBtn = page.getByRole('button', { name: new RegExp(`^${tab}$`, 'i') }).first();
+    if (await tabBtn.isVisible({ timeout: 10_000 }).catch(() => false)) {
+      await tabBtn.click();
     }
 
-    const curlTextarea = page.getByPlaceholder(/paste your team curl command/i).first();
+    const curlTextarea = page.getByPlaceholder(new RegExp(`paste your ${tab} curl command`, 'i')).first();
     await curlTextarea.waitFor({ state: 'visible', timeout: 15_000 });
     await curlTextarea.fill(curlCommand);
 
@@ -66,7 +65,7 @@ export async function uploadRiskyToMeetscript(
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 6 * 60_000)),
     ]);
 
-    const resultPath = `${downloadDir}/result-meetscript-${Date.now()}.png`;
+    const resultPath = `${downloadDir}/result-meetscript-${tab.toLowerCase()}-${Date.now()}.png`;
     await page.screenshot({ path: resultPath, fullPage: true }).catch(() => {});
 
     if (dialogMessage === null) {
@@ -79,9 +78,9 @@ export async function uploadRiskyToMeetscript(
 
     logger.info(`Đã bấm OK trên popup xác nhận: "${dialogMessage}" — ảnh: ${resultPath}`);
   } catch (err) {
-    const debugPath = `${downloadDir}/debug-meetscript-${Date.now()}.png`;
+    const debugPath = `${downloadDir}/debug-meetscript-${tab.toLowerCase()}-${Date.now()}.png`;
     await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
-    logger.error(`Lỗi khi upload lên meetscript.io — đã lưu ảnh debug: ${debugPath}`);
+    logger.error(`Lỗi khi upload lên meetscript.io (tab ${tab}) — đã lưu ảnh debug: ${debugPath}`);
     throw err;
   } finally {
     await page.close().catch(() => {});
