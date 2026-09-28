@@ -43,23 +43,41 @@ export async function uploadRiskyToMeetscript(
       }
     });
 
+    // Kết quả THẬT SỰ không phải 1 phần tử HTML trên trang mà là popup gốc của trình duyệt
+    // (window.alert) — Playwright coi đây là 1 loại sự kiện riêng ("dialog"), không thể tìm bằng
+    // locator/getByRole như các phần tử thường. Phải đăng ký lắng nghe TRƯỚC khi nó xuất hiện, và
+    // nó có thể mất tới ~5 phút mới hiện ra (server xử lý xong mới bắn alert), nên không được đóng
+    // trang sớm — lỗi trước đó là do đóng trang chỉ sau 5 giây, alert chưa kịp xuất hiện.
+    const dialogPromise = new Promise<string>((resolve) => {
+      page.once('dialog', (dialog) => {
+        const message = dialog.message();
+        dialog.accept().catch(() => {});
+        resolve(message);
+      });
+    });
+
     const uploadBtn = page.getByRole('button', { name: /^upload data$/i }).first();
     await uploadBtn.waitFor({ state: 'visible', timeout: 15_000 });
     await uploadBtn.click();
 
-    // Chờ 1 chút cho request thật (nếu có) và thông báo kết quả (toast/text) kịp xuất hiện, rồi
-    // LUÔN chụp ảnh màn hình (không chỉ lúc lỗi) — cần bằng chứng thực tế xem có thành công thật
-    // hay không, không tự suy diễn chỉ từ việc bấm nút không báo lỗi.
-    await page.waitForTimeout(5000);
+    logger.info('Đã bấm Upload Data — đang chờ popup xác nhận (có thể mất tới ~5 phút)...');
+    const dialogMessage = await Promise.race([
+      dialogPromise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 6 * 60_000)),
+    ]);
+
     const resultPath = `${downloadDir}/result-meetscript-${Date.now()}.png`;
     await page.screenshot({ path: resultPath, fullPage: true }).catch(() => {});
 
-    logger.info(`Đã bấm Upload Data — ảnh kết quả: ${resultPath}`);
-    if (responseLogs.length === 0) {
-      logger.warn('KHÔNG thấy request nào (ngoài file tĩnh) được gửi đi sau khi bấm Upload Data — có thể nút không thực sự submit gì.');
-    } else {
-      logger.info(`Các response ghi nhận được sau khi bấm Upload Data:\n${responseLogs.join('\n')}`);
+    if (dialogMessage === null) {
+      logger.warn(`Chờ quá 6 phút mà không thấy popup xác nhận — ảnh chụp lúc này: ${resultPath}`);
+      if (responseLogs.length > 0) {
+        logger.info(`Các response ghi nhận được:\n${responseLogs.join('\n')}`);
+      }
+      throw new Error('Không thấy popup xác nhận sau khi Upload Data (chờ 6 phút).');
     }
+
+    logger.info(`Đã bấm OK trên popup xác nhận: "${dialogMessage}" — ảnh: ${resultPath}`);
   } catch (err) {
     const debugPath = `${downloadDir}/debug-meetscript-${Date.now()}.png`;
     await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
