@@ -23,7 +23,7 @@ async function main() {
 
   const context = await openPersistentChrome();
   try {
-    const curlCommand = await fetchTeamsSearchCurl(context);
+    const curlCommand = await fetchTeamsSearchCurl(context, DOWNLOAD_DIR);
     await uploadRiskyToMeetscript(context, curlCommand, excelPath, DOWNLOAD_DIR);
   } finally {
     await context.close();

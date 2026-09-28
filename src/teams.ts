@@ -37,15 +37,42 @@ function buildCurlCommand(url: string, method: string, headers: Record<string, s
  * (URL + method + toàn bộ header, gồm cả cookie/authorization) rồi dựng thành 1 lệnh cURL —
  * dùng để dán vào form upload của meetscript.io (form đó cần đúng session Teams còn hiệu lực).
  */
-export async function fetchTeamsSearchCurl(context: BrowserContext, probeEmail = 'test@example.com'): Promise<string> {
+export async function fetchTeamsSearchCurl(
+  context: BrowserContext,
+  downloadDir: string,
+  probeEmail = 'test@example.com',
+): Promise<string> {
   const page = await context.newPage();
   try {
     const requestPromise: Promise<Request> = page.waitForRequest(SEARCH_USERS_URL_PATTERN, { timeout: 30_000 });
+    // Gắn ngay 1 catch rỗng để Node không coi promise này là "unhandled rejection" nếu nó
+    // timeout SỚM hơn lúc mình thật sự `await` nó ở dưới (vd khi ô search chưa tìm thấy và các
+    // bước phía trên đang chờ riêng) — Node mặc định CRASH cả tiến trình khi gặp unhandled
+    // rejection, nuốt luôn thông báo lỗi thật (đã xảy ra đúng vậy ở lần chạy trước).
+    requestPromise.catch(() => {});
 
     await page.goto('https://teams.live.com/v2/', { waitUntil: 'domcontentloaded' });
 
-    const searchBox = page.getByPlaceholder(/search/i).first();
-    await searchBox.waitFor({ state: 'visible', timeout: 30_000 });
+    // Chưa chắc đúng selector ô tìm kiếm thật của Teams (chỉ đoán từ ảnh chụp màn hình kết quả
+    // tìm kiếm, chưa thấy màn hình TRƯỚC khi search) — thử vài cách nhận diện phổ biến.
+    const searchBoxCandidates = [
+      page.getByPlaceholder(/search/i),
+      page.getByRole('searchbox'),
+      page.locator('[aria-label*="search" i]'),
+      page.locator('input[type="search"]'),
+      page.locator('input[type="text"]'),
+    ];
+    let searchBox = null;
+    for (const candidate of searchBoxCandidates) {
+      const loc = candidate.first();
+      if (await loc.isVisible({ timeout: 5000 }).catch(() => false)) {
+        searchBox = loc;
+        break;
+      }
+    }
+    if (!searchBox) {
+      throw new Error('Không tìm thấy ô tìm kiếm trên Teams (đã thử placeholder/role/aria-label/input).');
+    }
     await searchBox.click();
     await searchBox.fill(probeEmail);
 
@@ -54,6 +81,11 @@ export async function fetchTeamsSearchCurl(context: BrowserContext, probeEmail =
     const curl = buildCurlCommand(request.url(), request.method(), headers);
     logger.info(`Đã bắt được request "searchUsers" từ Teams (${request.method()} ${request.url().slice(0, 80)}...).`);
     return curl;
+  } catch (err) {
+    const debugPath = `${downloadDir}/debug-teams-${Date.now()}.png`;
+    await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
+    logger.error(`Lỗi khi lấy cURL từ Teams — đã lưu ảnh debug: ${debugPath}`);
+    throw err;
   } finally {
     await page.close().catch(() => {});
   }
