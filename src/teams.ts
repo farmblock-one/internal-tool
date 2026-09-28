@@ -76,26 +76,34 @@ export async function fetchTeamsSearchCurl(
     await page.goto('https://teams.live.com/v2/', { waitUntil: 'domcontentloaded' });
     await softWaitNetworkIdle(page);
 
-    // Ô search thật có placeholder "Look for people, messages, files and more" — KHÔNG chứa chữ
-    // "search", nên thử theo placeholder chính xác này TRƯỚC (tránh bấm nhầm 1 icon search nhỏ
-    // khác ở sidebar cũng khớp regex /search/i nhưng lại mở ra CHÍNH ô này, khiến fill() sau đó
-    // nhắm nhầm vào locator cũ). Giữ các cách đoán chung ở dưới làm fallback.
-    const searchBox = await findVisibleLocator(
+    // Đây là 1 ô input DUY NHẤT nhưng placeholder tự đổi chữ sau khi bấm vào — lúc đầu placeholder
+    // chung chung (khớp /search/i), sau khi click mới đổi thành "Look for people, messages, files
+    // and more". Playwright tìm lại phần tử theo ĐÚNG tiêu chí selector mỗi lần thao tác, nên nếu
+    // fill() dùng lại locator cũ (theo placeholder ban đầu) thì sau khi placeholder đổi, nó không
+    // còn khớp gì nữa và bị treo. Phải bấm mở bằng 1 lượt tìm, rồi TÌM LẠI theo placeholder mới
+    // trước khi gõ chữ.
+    const initialTrigger = await findVisibleLocator(
       [
-        page.getByPlaceholder(/look for people/i).first(),
         page.getByPlaceholder(/search/i).first(),
         page.getByRole('searchbox').first(),
         page.locator('[aria-label*="search" i]').first(),
         page.locator('input[type="search"]').first(),
-        page.locator('input[type="text"]').first(),
       ],
       10_000,
     );
-    if (!searchBox) {
-      throw new Error('Không tìm thấy ô tìm kiếm trên Teams (đã thử placeholder/role/aria-label/input).');
+    if (!initialTrigger) {
+      throw new Error('Không tìm thấy ô/nút search ban đầu trên Teams (đã thử placeholder/role/aria-label/input).');
     }
-    await searchBox.click();
-    await searchBox.fill(probeEmail);
+    await initialTrigger.click();
+
+    const expandedSearchBox = await findVisibleLocator(
+      [page.getByPlaceholder(/look for people/i).first(), page.getByPlaceholder(/search/i).first()],
+      10_000,
+    );
+    if (!expandedSearchBox) {
+      throw new Error('Bấm mở ô search xong nhưng không tìm lại được ô để gõ chữ (placeholder đổi khác dự kiến).');
+    }
+    await expandedSearchBox.fill(probeEmail);
 
     const request = await requestPromise;
     const headers = await request.allHeaders();
