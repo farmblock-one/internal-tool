@@ -18,8 +18,12 @@ function isHeaderToSkip(name: string): boolean {
   return lower.startsWith(':') || lower === 'content-length' || lower === 'host';
 }
 
-/** Dựng lại 1 request Playwright thành lệnh cURL (bash) — tương đương "Copy as cURL (bash)" của Chrome DevTools. */
-function buildCurlCommand(url: string, method: string, headers: Record<string, string>): string {
+/**
+ * Dựng lại 1 request Playwright thành lệnh cURL (bash) — tương đương "Copy as cURL (bash)" của
+ * Chrome DevTools. `searchUsers` là request POST kèm body (nội dung tìm kiếm) — thiếu `--data-raw`
+ * thì cURL gửi đi rỗng/không hợp lệ dù headers/URL đúng hết (đã bỏ sót ở bản đầu, sửa lại đây).
+ */
+function buildCurlCommand(url: string, method: string, headers: Record<string, string>, postData: string | null): string {
   const lines = [`curl ${shellEscapeSingleQuoted(url)}`];
   if (method.toUpperCase() !== 'GET') {
     lines.push(`  -X ${shellEscapeSingleQuoted(method.toUpperCase())}`);
@@ -27,6 +31,9 @@ function buildCurlCommand(url: string, method: string, headers: Record<string, s
   for (const [name, value] of Object.entries(headers)) {
     if (isHeaderToSkip(name)) continue;
     lines.push(`  -H ${shellEscapeSingleQuoted(`${name}: ${value}`)}`);
+  }
+  if (postData) {
+    lines.push(`  --data-raw ${shellEscapeSingleQuoted(postData)}`);
   }
   lines.push('  --compressed');
   return lines.join(' \\\n');
@@ -107,8 +114,12 @@ export async function fetchTeamsSearchCurl(
 
     const request = await requestPromise;
     const headers = await request.allHeaders();
-    const curl = buildCurlCommand(request.url(), request.method(), headers);
-    logger.info(`Đã bắt được request "searchUsers" từ Teams (${request.method()} ${request.url().slice(0, 80)}...).`);
+    const postData = request.postData();
+    const curl = buildCurlCommand(request.url(), request.method(), headers, postData);
+    logger.info(
+      `Đã bắt được request "searchUsers" từ Teams (${request.method()} ${request.url().slice(0, 80)}..., ` +
+        `body: ${postData ? `${postData.length} ký tự` : '(không có)'}).`,
+    );
     return curl;
   } catch (err) {
     const debugPath = `${downloadDir}/debug-teams-${Date.now()}.png`;
