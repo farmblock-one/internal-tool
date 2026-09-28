@@ -3,7 +3,7 @@ import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
 import { exportListEmails, importCsv } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
-import { readCsv, writeCsv, onlyEmailAndResult, filterByResult } from './csv-utils.js';
+import { readCsv, writeCsv, onlyEmailAndResult, filterByResult, dropColumns } from './csv-utils.js';
 import { uploadToDrive } from './drive.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
@@ -56,8 +56,15 @@ export async function runFlow(apolloListUrl: string): Promise<FlowResult> {
   // 1-2. Apollo: xoá filter, chọn tất cả, export email -> tải file CSV thô (tự thử lại nếu Chrome crash)
   const rawExportPath = await exportWithRetry(apolloListUrl, DOWNLOAD_DIR);
 
+  // 2.5. Trước khi gửi qua Debounce, bỏ 2 cột "Contact Owner" và "Account Owner" khỏi file export.
+  const rawRows = readCsv(rawExportPath);
+  const cleanedRows = dropColumns(rawRows, ['Contact Owner', 'Account Owner']);
+  const cleanedExportPath = path.join(PROCESSED_DIR, `apollo-export-cleaned-${Date.now()}.csv`);
+  writeCsv(cleanedExportPath, cleanedRows);
+  logger.info(`Đã xoá cột Contact Owner/Account Owner: ${cleanedExportPath}`);
+
   // 3. Verify email qua Debounce -> file có thêm cột RESULT
-  const debounceResultPath = await verifyListViaApi(rawExportPath, PROCESSED_DIR);
+  const debounceResultPath = await verifyListViaApi(cleanedExportPath, PROCESSED_DIR);
 
   return runFromDebounceResult(debounceResultPath, rawExportPath);
 }

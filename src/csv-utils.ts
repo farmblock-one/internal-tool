@@ -41,3 +41,20 @@ export function filterByResult(rows: Row[], keep: string[]): Row[] {
   const keepLower = keep.map((k) => k.toLowerCase());
   return rows.filter((r) => keepLower.includes((r[resultCol] ?? '').toLowerCase()));
 }
+
+/**
+ * Xoá hẳn 1 số cột khỏi toàn bộ rows (so tên không phân biệt hoa/thường) — dùng để bỏ các cột
+ * không cần gửi qua Debounce (vd "Contact Owner", "Account Owner"). Cột nào không có trong file
+ * thì bỏ qua, không báo lỗi (không phải mọi export đều chắc chắn có đủ các cột này).
+ */
+export function dropColumns(rows: Row[], columnNames: string[]): Row[] {
+  if (rows.length === 0) return rows;
+  const toDropLower = new Set(columnNames.map((c) => c.toLowerCase()));
+  return rows.map((row) => {
+    const cleaned: Row = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (!toDropLower.has(key.toLowerCase())) cleaned[key] = value;
+    }
+    return cleaned;
+  });
+}
