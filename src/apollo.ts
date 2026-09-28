@@ -415,7 +415,11 @@ async function ensureToggleOff(page: Page, labelPattern: RegExp, indexFallback: 
 
   const isOn = async () => (await toggle.getAttribute('aria-checked')) === 'true';
   if (await isOn()) {
-    await toggle.click();
+    // Input thật bị 1 lớp div hiển thị đè lên (theo log thực tế: "<div class=\"zp_uX_gT\">
+    // intercepts pointer events"), khiến click thường cứ retry rồi timeout. Input vẫn là
+    // input[type=checkbox] thật (không phải chỉ để trang trí) nên bấm "ép" (bỏ qua kiểm tra lớp
+    // phủ) vẫn kích hoạt đúng sự kiện change/toggle của nó.
+    await toggle.click({ force: true });
     await page.waitForTimeout(300);
   }
   if (await isOn()) {
