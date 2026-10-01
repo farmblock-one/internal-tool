@@ -1,6 +1,6 @@
 import type { BrowserContext, Page, Request } from 'playwright';
 import { logger } from './logger.js';
-import { buildCurlCommand, findVisibleLocator } from './curl-utils.js';
+import { buildCurlCommand, findVisibleLocator, hardReload } from './curl-utils.js';
 
 const SEARCH_USERS_URL_PATTERN = /searchUsers/i;
 
@@ -21,15 +21,18 @@ export async function fetchTeamsSearchCurl(
 ): Promise<string> {
   const page = await context.newPage();
   try {
+    await page.goto('https://teams.live.com/v2/', { waitUntil: 'domcontentloaded' });
+    // Reload cứng (bỏ qua cache, tương đương Ctrl+Shift+R) trước khi search — nghi ngờ bản JS/
+    // token cũ trong cache khiến request bắt được trước đó không hợp lệ dù có vẻ đúng cấu trúc.
+    await hardReload(page);
+    await softWaitNetworkIdle(page);
+
     const requestPromise: Promise<Request> = page.waitForRequest(SEARCH_USERS_URL_PATTERN, { timeout: 30_000 });
     // Gắn ngay 1 catch rỗng để Node không coi promise này là "unhandled rejection" nếu nó
     // timeout SỚM hơn lúc mình thật sự `await` nó ở dưới (vd khi ô search chưa tìm thấy và các
     // bước phía trên đang chờ riêng) — Node mặc định CRASH cả tiến trình khi gặp unhandled
     // rejection, nuốt luôn thông báo lỗi thật (đã xảy ra đúng vậy ở lần chạy trước).
     requestPromise.catch(() => {});
-
-    await page.goto('https://teams.live.com/v2/', { waitUntil: 'domcontentloaded' });
-    await softWaitNetworkIdle(page);
 
     // Đây là 1 ô input DUY NHẤT nhưng placeholder tự đổi chữ sau khi bấm vào — lúc đầu placeholder
     // chung chung (khớp /search/i), sau khi click mới đổi thành "Look for people, messages, files

@@ -1,4 +1,4 @@
-import type { Locator } from 'playwright';
+import type { Locator, Page } from 'playwright';
 
 /** Escape 1 giá trị để đặt an toàn trong dấu nháy đơn của lệnh bash (kiểu Chrome DevTools làm). */
 function shellEscapeSingleQuoted(value: string): string {
@@ -57,4 +57,19 @@ export async function findVisibleLocator(candidates: Locator[], timeoutMs: numbe
     if (found) return candidate;
   }
   return null;
+}
+
+/**
+ * Reload "cứng" (tương đương Ctrl+Shift+R — bỏ qua cache) trước khi search, theo đúng yêu cầu:
+ * nghi ngờ trang dùng bản JS/token cũ trong cache khiến request bắt được không hợp lệ. Playwright
+ * không có API public cho hard reload nên phải gọi thẳng lệnh CDP `Page.reload` với `ignoreCache`.
+ */
+export async function hardReload(page: Page): Promise<void> {
+  const cdpSession = await page.context().newCDPSession(page);
+  try {
+    await cdpSession.send('Page.reload', { ignoreCache: true });
+    await page.waitForLoadState('domcontentloaded');
+  } finally {
+    await cdpSession.detach().catch(() => {});
+  }
 }

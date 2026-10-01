@@ -1,6 +1,6 @@
 import type { BrowserContext, Page, Request } from 'playwright';
 import { logger } from './logger.js';
-import { buildCurlCommand, findVisibleLocator } from './curl-utils.js';
+import { buildCurlCommand, findVisibleLocator, hardReload } from './curl-utils.js';
 
 // Có cả request "Lookup" (OPTIONS, preflight) và request "Lookup" thật (thường là POST) — CHỈ bắt
 // cái thật, bỏ qua OPTIONS, nếu không dễ bắt nhầm cái preflight (không có auth header đầy đủ).
@@ -27,13 +27,16 @@ export async function fetchGmailLookupCurl(
 ): Promise<string> {
   const page = await context.newPage();
   try {
+    await page.goto('https://mail.google.com/', { waitUntil: 'domcontentloaded' });
+    // Reload cứng (bỏ qua cache, tương đương Ctrl+Shift+R) trước khi search — nghi ngờ bản JS/
+    // token cũ trong cache khiến request bắt được trước đó không hợp lệ dù có vẻ đúng cấu trúc.
+    await hardReload(page);
+    await softWaitNetworkIdle(page);
+
     const requestPromise: Promise<Request> = page.waitForRequest(isRealLookupRequest, { timeout: 30_000 });
     // Xem giải thích ở teams.ts: gắn catch rỗng ngay để Node không crash vì unhandled rejection
     // nếu promise này timeout trước khi mình thật sự await nó ở dưới.
     requestPromise.catch(() => {});
-
-    await page.goto('https://mail.google.com/', { waitUntil: 'domcontentloaded' });
-    await softWaitNetworkIdle(page);
 
     const searchBox = await findVisibleLocator(
       [
