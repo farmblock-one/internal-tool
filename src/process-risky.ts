@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
 import { readCsv, extractEmails } from './csv-utils.js';
@@ -26,9 +27,17 @@ async function main() {
   const context = await openPersistentChrome();
   try {
     const teamsCurl = await fetchTeamsSearchCurl(context, DOWNLOAD_DIR);
+    // Lưu cURL ra file riêng (KHÔNG in thẳng ra log/chat — có chứa token đăng nhập thật) để tự
+    // kiểm tra đối chiếu với 1 cURL mẫu đã biết là hợp lệ, qua scp tải về máy, không qua bên nào khác.
+    const teamsCurlPath = path.join(PROCESSED_DIR, `teams-curl-${Date.now()}.txt`);
+    fs.writeFileSync(teamsCurlPath, teamsCurl);
+    logger.info(`Đã lưu cURL Teams để kiểm tra: ${teamsCurlPath}`);
     await uploadRiskyToMeetscript(context, teamsCurl, excelPath, DOWNLOAD_DIR, 'TEAM');
 
     const gmailCurl = await fetchGmailLookupCurl(context, DOWNLOAD_DIR);
+    const gmailCurlPath = path.join(PROCESSED_DIR, `gmail-curl-${Date.now()}.txt`);
+    fs.writeFileSync(gmailCurlPath, gmailCurl);
+    logger.info(`Đã lưu cURL Gmail để kiểm tra: ${gmailCurlPath}`);
     await uploadRiskyToMeetscript(context, gmailCurl, excelPath, DOWNLOAD_DIR, 'GOOGLE');
   } finally {
     await context.close();
