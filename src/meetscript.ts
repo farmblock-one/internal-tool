@@ -1,5 +1,6 @@
 import type { BrowserContext } from 'playwright';
 import { logger } from './logger.js';
+import { findVisibleLocator } from './curl-utils.js';
 
 /**
  * Mở seacher.meetscript.io, chọn đúng tab (TEAM hoặc GOOGLE), dán lệnh cURL tương ứng + chọn file
@@ -17,10 +18,14 @@ export async function uploadRiskyToMeetscript(
   try {
     await page.goto('https://seacher.meetscript.io/', { waitUntil: 'domcontentloaded' });
 
-    const tabBtn = page.getByRole('button', { name: new RegExp(`^${tab}$`, 'i') }).first();
-    if (await tabBtn.isVisible({ timeout: 10_000 }).catch(() => false)) {
-      await tabBtn.click();
+    // isVisible() kiểm tra TỨC THÌ, không chờ/poll như waitFor — nếu trang chưa kịp render xong,
+    // nó trả về false ngay và code bỏ qua luôn việc bấm nút, kẹt lại ở tab mặc định (TEAM). Đã gặp
+    // đúng lỗi này ở teams.ts/gmail.ts trước đó, giờ sửa luôn ở đây bằng findVisibleLocator (poll thật).
+    const tabBtn = await findVisibleLocator([page.getByRole('button', { name: new RegExp(`^${tab}$`, 'i') }).first()], 10_000);
+    if (!tabBtn) {
+      throw new Error(`Không tìm thấy nút tab "${tab}" trên meetscript.io.`);
     }
+    await tabBtn.click();
 
     const curlTextarea = page.getByPlaceholder(new RegExp(`paste your ${tab} curl command`, 'i')).first();
     await curlTextarea.waitFor({ state: 'visible', timeout: 15_000 });
