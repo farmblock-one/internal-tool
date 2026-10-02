@@ -55,6 +55,9 @@ export async function fetchGmailLookupCurl(
     // phản ứng với fill() (gán giá trị thẳng vào input) — gõ từng ký tự thật để chắc chắn trigger
     // đúng request lookup, giống hệt cách người dùng gõ tay.
     await searchBox.pressSequentially(probeEmail, { delay: 80 });
+    // Request "Lookup" CHỈ bắn ra sau khi bấm Enter để thật sự tìm kiếm — gõ vào ô không đủ, dropdown
+    // gợi ý lúc đó chỉ là lịch sử tìm kiếm thường, không phải lookup liên hệ (đã xác nhận thực tế).
+    await searchBox.press('Enter');
 
     const request = await requestPromise;
     const headers = await request.allHeaders();
