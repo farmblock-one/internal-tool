@@ -26,6 +26,14 @@ export async function fetchGmailLookupCurl(
   probeEmail = 'anna.nguyen@payreq.com',
 ): Promise<string> {
   const page = await context.newPage();
+  // Khai báo NGOÀI try để catch vẫn đọc được danh sách request đã thấy khi có lỗi/timeout.
+  const staticAssetPattern = /\.(js|css|png|jpe?g|svg|gif|woff2?|ico)(\?|$)/i;
+  const seenRequests: string[] = [];
+  page.on('request', (req) => {
+    if (!staticAssetPattern.test(req.url())) {
+      seenRequests.push(`${req.method()} ${req.url()}`);
+    }
+  });
   try {
     await page.goto('https://mail.google.com/', { waitUntil: 'domcontentloaded' });
     // Reload cứng (bỏ qua cache, tương đương Ctrl+Shift+R) trước khi search — nghi ngờ bản JS/
@@ -33,7 +41,10 @@ export async function fetchGmailLookupCurl(
     await hardReload(page);
     await softWaitNetworkIdle(page);
 
-    const requestPromise: Promise<Request> = page.waitForRequest(isRealLookupRequest, { timeout: 30_000 });
+    // Request Lookup thật đi tới domain RIÊNG (peoplestack-pa.clients6.google.com, khác hẳn
+    // mail.google.com) và chỉ bắn ra SAU KHI phần kết quả tìm kiếm chính tải xong — ảnh debug lần
+    // trước cho thấy trang còn đang "Loading..." lúc hết 30s, nên tăng thời gian chờ lên nhiều.
+    const requestPromise: Promise<Request> = page.waitForRequest(isRealLookupRequest, { timeout: 90_000 });
     // Xem giải thích ở teams.ts: gắn catch rỗng ngay để Node không crash vì unhandled rejection
     // nếu promise này timeout trước khi mình thật sự await nó ở dưới.
     requestPromise.catch(() => {});
@@ -72,6 +83,11 @@ export async function fetchGmailLookupCurl(
     const debugPath = `${downloadDir}/debug-gmail-${Date.now()}.png`;
     await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
     logger.error(`Lỗi khi lấy cURL từ Gmail — đã lưu ảnh debug: ${debugPath}`);
+    if (seenRequests.length > 0) {
+      logger.error(`Các request đã thấy được (không tính file tĩnh):\n${seenRequests.slice(-40).join('\n')}`);
+    } else {
+      logger.error('KHÔNG thấy request nào (ngoài file tĩnh) trong suốt thời gian chờ.');
+    }
     throw err;
   } finally {
     await page.close().catch(() => {});
