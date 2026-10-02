@@ -5,6 +5,27 @@ function shellEscapeSingleQuoted(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+// Các header này do CHÍNH trình duyệt tự quản lý (cookie jar, CORS/fetch metadata, content
+// negotiation) — Chrome DevTools "Copy as cURL" tự loại bỏ hết khi copy, không đưa vào text.
+// Playwright's request.allHeaders() thì lấy NGUYÊN VĂN mọi header thật sự gửi trên dây mạng, nên
+// nếu không lọc tay sẽ dư ra các header này — đã xác nhận qua so sánh với 1 cURL mẫu lấy tay thật
+// (từ DevTools): bản mẫu không có bất kỳ header nào trong danh sách dưới, kể cả "cookie" (request
+// này rõ ràng không cần cookie, xác thực hoàn toàn qua authorization/x-skypetoken).
+const BROWSER_MANAGED_HEADERS = new Set([
+  'cookie',
+  'origin',
+  'priority',
+  'accept-encoding',
+  'accept-language',
+  'sec-fetch-dest',
+  'sec-fetch-mode',
+  'sec-fetch-site',
+  'sec-fetch-user',
+  'sec-ch-ua',
+  'sec-ch-ua-mobile',
+  'sec-ch-ua-platform',
+]);
+
 /**
  * Header giả (pseudo-header, HTTP/2) bắt đầu bằng ":" không hợp lệ trong cú pháp `curl -H`, và
  * "content-length"/"host" nên để curl tự tính/tự suy ra từ URL — copy nguyên các header này vào
@@ -12,7 +33,7 @@ function shellEscapeSingleQuoted(value: string): string {
  */
 function isHeaderToSkip(name: string): boolean {
   const lower = name.toLowerCase();
-  return lower.startsWith(':') || lower === 'content-length' || lower === 'host';
+  return lower.startsWith(':') || lower === 'content-length' || lower === 'host' || BROWSER_MANAGED_HEADERS.has(lower);
 }
 
 /**
