@@ -21,10 +21,23 @@ export async function uploadRiskyToMeetscript(
     // isVisible() kiểm tra TỨC THÌ, không chờ/poll như waitFor — nếu trang chưa kịp render xong,
     // nó trả về false ngay và code bỏ qua luôn việc bấm nút, kẹt lại ở tab mặc định (TEAM). Đã gặp
     // đúng lỗi này ở teams.ts/gmail.ts trước đó, giờ sửa luôn ở đây bằng findVisibleLocator (poll thật).
-    // Khớp chính xác tuyệt đối (^TEAM$) hoá ra KHÔNG BAO GIỜ khớp thật (chỉ "chạy được" trước đây
-    // vì TEAM vốn mặc định active sẵn nên bỏ qua bấm vẫn vô hại) — nút có icon cạnh chữ nên tên
-    // accessible có thể dài hơn chữ hiển thị. Đổi sang khớp CÓ CHỨA (không neo ^...$) cho chắc.
-    const tabBtn = await findVisibleLocator([page.getByRole('button', { name: new RegExp(tab, 'i') }).first()], 10_000);
+    // Đổi sang khớp CÓ CHỨA (không neo ^...$) vẫn không ăn thua — khả năng cao đây không phải thẻ
+    // <button> thật (không có role="button"), nên getByRole('button', ...) không bao giờ tìm
+    // thấy dù tên đúng. Thử thêm nhiều cách nhận diện khác: role="tab", mọi phần tử có role
+    // button/tab, và cuối cùng là bấm thẳng vào chữ hiển thị (dựa vào bubbling lên phần tử cha
+    // có thể bấm được).
+    const tabBtn = await findVisibleLocator(
+      [
+        page.getByRole('button', { name: new RegExp(tab, 'i') }).first(),
+        page.getByRole('tab', { name: new RegExp(tab, 'i') }).first(),
+        page
+          .locator('button, [role="button"], [role="tab"]')
+          .filter({ hasText: new RegExp(tab, 'i') })
+          .first(),
+        page.getByText(new RegExp(`^${tab}$`, 'i')).first(),
+      ],
+      10_000,
+    );
     if (!tabBtn) {
       throw new Error(`Không tìm thấy nút tab "${tab}" trên meetscript.io.`);
     }
