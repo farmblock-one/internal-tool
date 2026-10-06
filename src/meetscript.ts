@@ -21,7 +21,10 @@ export async function uploadRiskyToMeetscript(
     // isVisible() kiểm tra TỨC THÌ, không chờ/poll như waitFor — nếu trang chưa kịp render xong,
     // nó trả về false ngay và code bỏ qua luôn việc bấm nút, kẹt lại ở tab mặc định (TEAM). Đã gặp
     // đúng lỗi này ở teams.ts/gmail.ts trước đó, giờ sửa luôn ở đây bằng findVisibleLocator (poll thật).
-    const tabBtn = await findVisibleLocator([page.getByRole('button', { name: new RegExp(`^${tab}$`, 'i') }).first()], 10_000);
+    // Khớp chính xác tuyệt đối (^TEAM$) hoá ra KHÔNG BAO GIỜ khớp thật (chỉ "chạy được" trước đây
+    // vì TEAM vốn mặc định active sẵn nên bỏ qua bấm vẫn vô hại) — nút có icon cạnh chữ nên tên
+    // accessible có thể dài hơn chữ hiển thị. Đổi sang khớp CÓ CHỨA (không neo ^...$) cho chắc.
+    const tabBtn = await findVisibleLocator([page.getByRole('button', { name: new RegExp(tab, 'i') }).first()], 10_000);
     if (!tabBtn) {
       throw new Error(`Không tìm thấy nút tab "${tab}" trên meetscript.io.`);
     }
