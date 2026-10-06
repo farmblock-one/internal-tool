@@ -5,35 +5,34 @@ function shellEscapeSingleQuoted(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-// Các header này do CHÍNH trình duyệt tự quản lý (cookie jar, CORS/fetch metadata, content
-// negotiation) — Chrome DevTools "Copy as cURL" tự loại bỏ hết khi copy, không đưa vào text.
-// Playwright's request.allHeaders() thì lấy NGUYÊN VĂN mọi header thật sự gửi trên dây mạng, nên
-// nếu không lọc tay sẽ dư ra các header này — đã xác nhận qua so sánh với 1 cURL mẫu lấy tay thật
-// (từ DevTools): bản mẫu không có bất kỳ header nào trong danh sách dưới, kể cả "cookie" (request
-// này rõ ràng không cần cookie, xác thực hoàn toàn qua authorization/x-skypetoken).
-const BROWSER_MANAGED_HEADERS = new Set([
-  'cookie',
-  'origin',
-  'priority',
+// LƯU Ý QUAN TRỌNG (đã sửa lại sau khi so sánh với cURL mẫu thật của GMAIL): trước đây tưởng Chrome
+// DevTools "Copy as cURL" luôn xoá 1 danh sách cố định các header (cookie, origin, sec-fetch-*,
+// sec-ch-ua*, accept-language, priority...) ở MỌI trang — kết luận này rút ra từ so sánh với cURL
+// mẫu của TEAMS, nơi các header đó không xuất hiện. Nhưng hoá ra Teams đơn giản là KHÔNG GỬI mấy
+// header đó (xác thực thuần qua bearer/x-skypetoken, không cần cookie) nên lúc đó có lọc hay không
+// cũng không khác gì — không phải Chrome chủ động xoá. cURL mẫu thật của GMAIL thì CÓ đầy đủ
+// cookie, origin, sec-fetch-*, sec-ch-ua*, accept-language, priority (cookie đặc biệt quan trọng
+// vì cơ chế xác thực SAPISIDHASH của Google được tính từ giá trị cookie SAPISID). Vậy quy tắc đúng
+// là: KHÔNG đoán header nào trình duyệt "ẩn", gửi lại NGUYÊN VĂN mọi header capture được — chỉ bỏ
+// những gì chắc chắn làm cURL replay sai/thừa.
+const HEADERS_INVALID_FOR_CURL_REPLAY = new Set([
+  // curl tự tính lại content-length từ --data-raw; giữ giá trị capture được (của body gốc) có thể
+  // sai lệch nếu máy chủ validate đúng độ dài.
+  'content-length',
+  // host suy ra thẳng từ --url, không cần/không nên khai tay.
+  'host',
+  // Không có cURL mẫu thật nào (cả Teams lẫn Gmail) có header này hay cờ --compressed — để curl tự
+  // thương lượng encoding thay vì khai cứng 1 giá trị capture được.
   'accept-encoding',
-  'accept-language',
-  'sec-fetch-dest',
-  'sec-fetch-mode',
-  'sec-fetch-site',
-  'sec-fetch-user',
-  'sec-ch-ua',
-  'sec-ch-ua-mobile',
-  'sec-ch-ua-platform',
 ]);
 
 /**
- * Header giả (pseudo-header, HTTP/2) bắt đầu bằng ":" không hợp lệ trong cú pháp `curl -H`, và
- * "content-length"/"host" nên để curl tự tính/tự suy ra từ URL — copy nguyên các header này vào
- * sẽ sai hoặc thừa, giống hệt cách Chrome DevTools tự lọc khi "Copy as cURL".
+ * Header giả (pseudo-header, HTTP/2) bắt đầu bằng ":" không hợp lệ trong cú pháp `curl -H`, và vài
+ * header khác (xem HEADERS_INVALID_FOR_CURL_REPLAY) nên bỏ vì replay lại nguyên văn sẽ sai/thừa.
  */
 function isHeaderToSkip(name: string): boolean {
   const lower = name.toLowerCase();
-  return lower.startsWith(':') || lower === 'content-length' || lower === 'host' || BROWSER_MANAGED_HEADERS.has(lower);
+  return lower.startsWith(':') || HEADERS_INVALID_FOR_CURL_REPLAY.has(lower);
 }
 
 /**
@@ -55,6 +54,13 @@ export function buildCurlCommand(url: string, method: string, headers: Record<st
   }
   for (const [name, value] of Object.entries(headers)) {
     if (isHeaderToSkip(name)) continue;
+    // cURL mẫu thật dùng cờ riêng `-b '<cookie>'` cho cookie, không phải `-H 'cookie: ...'` — dù
+    // về MẶT KỸ THUẬT 2 cách đều gửi cùng 1 header Cookie, vẫn khớp đúng định dạng để chắc chắn
+    // (phòng trường hợp bên nhận cURL tự parse text tìm cờ `-b` cụ thể thay vì đọc mọi `-H`).
+    if (name.toLowerCase() === 'cookie') {
+      lines.push(`  -b ${shellEscapeSingleQuoted(value)}`);
+      continue;
+    }
     lines.push(`  -H ${shellEscapeSingleQuoted(value === '' ? `${name};` : `${name}: ${value}`)}`);
   }
   if (postData) {
