@@ -1,38 +1,16 @@
 import fs from 'node:fs';
-import type { BrowserContext, Locator, Page } from 'playwright';
+import type { BrowserContext, Page } from 'playwright';
 import { logger } from './logger.js';
 
-/**
- * 3 lần trước đổi cách đoán selector (role=button -> role=tab -> nhiều loại phần tử/text) đều
- * thất bại GIỐNG HỆT NHAU dù ảnh debug cho thấy nút hiển thị rõ ràng, bình thường trên trang. Ảnh
- * chụp (screenshot) ghi lại TOÀN BỘ hình ảnh hiển thị kể cả nội dung bên trong iframe, nhưng
- * page.getByRole()/page.locator() mặc định CHỈ tìm trong frame chính (main frame), không tự chui
- * vào iframe — nếu nút TEAM/GOOGLE nằm trong 1 iframe (ví dụ nhúng 1 widget bên thứ 3), ảnh vẫn
- * thấy nút nhưng locator tìm ở frame chính sẽ không bao giờ thấy, bất kể đổi kiểu selector nào.
- * Sửa bằng cách duyệt qua TẤT CẢ frame của trang (page.frames(), bao gồm cả frame chính), tự poll
- * định kỳ (vì không gọi waitFor trực tiếp được khi cần duyệt nhiều frame thay đổi theo thời gian).
- */
-async function findTabButtonAnyFrame(page: Page, tab: string, timeoutMs: number): Promise<Locator | null> {
-  const pattern = new RegExp(tab, 'i');
-  const exactPattern = new RegExp(`^${tab}$`, 'i');
-  const deadline = Date.now() + timeoutMs;
-  do {
-    for (const frame of page.frames()) {
-      const candidates = [
-        frame.getByRole('button', { name: pattern }).first(),
-        frame.getByRole('tab', { name: pattern }).first(),
-        frame.locator('button, [role="button"], [role="tab"]').filter({ hasText: pattern }).first(),
-        frame.getByText(exactPattern).first(),
-      ];
-      for (const candidate of candidates) {
-        const visible = await candidate.isVisible().catch(() => false);
-        if (visible) return candidate;
-      }
-    }
-    await page.waitForTimeout(300);
-  } while (Date.now() < deadline);
-  return null;
-}
+// Đọc thẳng HTML của trang (lưu lại từ 1 lần lỗi trước) mới biết được ID THẬT của 2 nút toggle —
+// không phải <button role="button"> với text "TEAM"/"GOOGLE" như đoán, mà là 2 <div>/phần tử lấy
+// qua document.getElementById('teamOption') / getElementById('googleOption'), gắn addEventListener
+// 'click' riêng. Đây là lý do mọi cách đoán theo role=button/role=tab/text hiển thị trước đó đều
+// thất bại giống hệt nhau — phần tử không có role phù hợp để getByRole/getByText nhận diện đúng.
+const TAB_ELEMENT_IDS: Record<'TEAM' | 'GOOGLE', string> = {
+  TEAM: 'teamOption',
+  GOOGLE: 'googleOption',
+};
 
 /** Lưu lại bằng chứng thật (HTML + danh sách frame) khi không tìm được nút, thay vì tiếp tục đoán mò. */
 async function dumpDebugEvidence(page: Page, downloadDir: string, tab: string): Promise<string> {
@@ -68,18 +46,16 @@ export async function uploadRiskyToMeetscript(
   try {
     await page.goto('https://seacher.meetscript.io/', { waitUntil: 'domcontentloaded' });
 
-    // isVisible() kiểm tra TỨC THÌ, không chờ/poll như waitFor — nếu trang chưa kịp render xong,
-    // nó trả về false ngay và code bỏ qua luôn việc bấm nút, kẹt lại ở tab mặc định (TEAM). Đã gặp
-    // đúng lỗi này ở teams.ts/gmail.ts trước đó, giờ sửa luôn ở đây bằng findVisibleLocator (poll thật).
-    // Đổi sang khớp CÓ CHỨA (không neo ^...$) vẫn không ăn thua — khả năng cao đây không phải thẻ
-    // <button> thật (không có role="button"), nên getByRole('button', ...) không bao giờ tìm
-    // thấy dù tên đúng. 3 lần đổi cách đoán selector trước đều thất bại giống hệt nhau dù ảnh chụp
-    // cho thấy nút hiển thị bình thường — nghi ngờ nút nằm trong 1 iframe (widget nhúng), nên giờ
-    // duyệt qua TẤT CẢ frame của trang thay vì chỉ tìm ở frame chính.
-    const tabBtn = await findTabButtonAnyFrame(page, tab, 15_000);
-    if (!tabBtn) {
+    // Bấm theo đúng ID thật lấy được từ HTML trang (#teamOption / #googleOption) — xem giải thích
+    // ở TAB_ELEMENT_IDS phía trên, không còn đoán theo role/text hiển thị nữa.
+    const tabBtn = page.locator(`#${TAB_ELEMENT_IDS[tab]}`).first();
+    const tabBtnVisible = await tabBtn
+      .waitFor({ state: 'visible', timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!tabBtnVisible) {
       await dumpDebugEvidence(page, downloadDir, tab);
-      throw new Error(`Không tìm thấy nút tab "${tab}" trên meetscript.io.`);
+      throw new Error(`Không tìm thấy phần tử tab "${tab}" (#${TAB_ELEMENT_IDS[tab]}) trên meetscript.io.`);
     }
     await tabBtn.click();
 
