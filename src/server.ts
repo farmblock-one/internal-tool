@@ -123,7 +123,30 @@ ${body}
 }
 
 function renderHome(): string {
-  const recentJobs = [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 20);
+  const allJobs = [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
+  // "running" chỉ có tối đa 1 job (processQueue chạy tuần tự), nhưng "queued" có thể nhiều người
+  // cùng bấm — liệt kê hết để ai mở trang cũng thấy ngay đang có bao nhiêu người xếp hàng trước.
+  const activeJobs = allJobs.filter((j) => j.status === 'queued' || j.status === 'running');
+  const recentJobs = allJobs.slice(0, 20);
+
+  const banner =
+    activeJobs.length > 0
+      ? `<div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px;border-radius:6px;margin-bottom:16px;">
+          <strong>⚠️ Đang có ${activeJobs.length} luồng đang chạy hoặc chờ chạy:</strong>
+          <ul style="margin:8px 0 0;padding-left:20px;">
+            ${activeJobs
+              .map(
+                (j) =>
+                  `<li><a href="/jobs/${j.id}">${escapeHtml(j.outputFileName || j.id)}</a> — ` +
+                  `<span class="status status-${j.status}">${j.status}</span> ` +
+                  `(bắt đầu lúc ${new Date(j.createdAt).toLocaleString('vi-VN')})</li>`,
+              )
+              .join('')}
+          </ul>
+          <p style="margin:8px 0 0;">Mỗi lần chỉ chạy 1 luồng — nếu bạn bấm "Bắt đầu chạy" bây giờ, luồng của bạn sẽ tự xếp hàng chờ (các) luồng trên chạy xong trước, không chạy song song được.</p>
+        </div>`
+      : '';
+
   const rows = recentJobs
     .map(
       (j) => `<tr>
@@ -135,7 +158,9 @@ function renderHome(): string {
     .join('');
 
   const body = `
+${activeJobs.length > 0 ? '<meta http-equiv="refresh" content="5" />' : ''}
 <h1>Chạy luồng Apollo → Debounce</h1>
+${banner}
 <form method="POST" action="/jobs">
   <label for="listUrl">Link List Apollo</label>
   <input type="url" id="listUrl" name="listUrl" placeholder="https://app.apollo.io/#/lists/..." required />
