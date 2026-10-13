@@ -3,9 +3,7 @@ import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
 import { exportListEmails, importCsv } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
-import { readCsv, writeCsv, onlyEmailAndResult, filterByResult, dropColumns } from './csv-utils.js';
-import { uploadToDrive } from './drive.js';
-import { config } from './config.js';
+import { readCsv, writeCsv, onlyEmailAndResult, filterByResult, dropColumns, dropRowsByColumnValue } from './csv-utils.js';
 import { logger } from './logger.js';
 import { captureCrashDiagnostics } from './diagnostics.js';
 
@@ -56,9 +54,17 @@ export async function runFlow(apolloListUrl: string): Promise<FlowResult> {
   // 1-2. Apollo: xoá filter, chọn tất cả, export email -> tải file CSV thô (tự thử lại nếu Chrome crash)
   const rawExportPath = await exportWithRetry(apolloListUrl, DOWNLOAD_DIR);
 
-  // 2.5. Trước khi gửi qua Debounce, bỏ 2 cột "Contact Owner" và "Account Owner" khỏi file export.
+  // 2.5a. Trước khi gửi qua Debounce, bỏ hẳn các lead có "Email Status" = "Unavailable" — Apollo
+  // coi như các lead này không có email khả dụng, gửi qua Debounce verify chỉ tốn request vô ích.
   const rawRows = readCsv(rawExportPath);
-  const cleanedRows = dropColumns(rawRows, ['Contact Owner', 'Account Owner']);
+  const availableRows = dropRowsByColumnValue(rawRows, ['Email Status'], ['Unavailable']);
+  logger.info(
+    `Đã bỏ ${rawRows.length - availableRows.length} lead có Email Status = Unavailable ` +
+      `(còn lại ${availableRows.length}/${rawRows.length}).`,
+  );
+
+  // 2.5b. Bỏ 2 cột "Contact Owner" và "Account Owner" khỏi file export.
+  const cleanedRows = dropColumns(availableRows, ['Contact Owner', 'Account Owner']);
   const cleanedExportPath = path.join(PROCESSED_DIR, `apollo-export-cleaned-${Date.now()}.csv`);
   writeCsv(cleanedExportPath, cleanedRows);
   logger.info(`Đã xoá cột Contact Owner/Account Owner: ${cleanedExportPath}`);
@@ -104,9 +110,8 @@ export async function runFromDebounceResult(
   writeCsv(safePath, safeRows);
   writeCsv(riskyPath, riskyRows);
 
-  // 7. Upload file Safe to Send lên Google Drive
-  await uploadToDrive(safePath, config.gdriveSafeToSendFolderId);
-
-  logger.info(`Hoàn tất luồng. File Risky chờ xử lý tiếp (luồng nội bộ khác): ${riskyPath}`);
+  // KHÔNG upload file Safe to Send lên Drive ở giai đoạn này nữa — việc upload sẽ chuyển sang 1
+  // giai đoạn khác ở sau (theo yêu cầu mới), file safePath vẫn được tạo ra sẵn để dùng ở đó.
+  logger.info(`Hoàn tất luồng. File Safe to Send: ${safePath}. File Risky chờ xử lý tiếp (luồng nội bộ khác): ${riskyPath}`);
   return { rawExportPath, debounceResultPath, reimportPath, safePath, riskyPath };
 }

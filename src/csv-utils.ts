@@ -50,6 +50,17 @@ export function filterByResult(rows: Row[], keep: string[]): Row[] {
 }
 
 /**
+ * Xoá các row có giá trị 1 cột (so khớp alias, không phân biệt hoa/thường) nằm trong `exclude` —
+ * dùng để bỏ các lead có "Email Status" = "Unavailable" TRƯỚC khi gửi qua Debounce (lead này
+ * Apollo coi như không có email khả dụng, verify qua Debounce chỉ tốn request vô ích).
+ */
+export function dropRowsByColumnValue(rows: Row[], columnAliases: string[], exclude: string[]): Row[] {
+  const column = findColumn(rows, columnAliases);
+  const excludeLower = exclude.map((v) => v.toLowerCase());
+  return rows.filter((r) => !excludeLower.includes((r[column] ?? '').toLowerCase()));
+}
+
+/**
  * Xoá hẳn 1 số cột khỏi toàn bộ rows (so tên không phân biệt hoa/thường) — dùng để bỏ các cột
  * không cần gửi qua Debounce (vd "Contact Owner", "Account Owner"). Cột nào không có trong file
  * thì bỏ qua, không báo lỗi (không phải mọi export đều chắc chắn có đủ các cột này).
