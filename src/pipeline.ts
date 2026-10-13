@@ -4,6 +4,8 @@ import { openPersistentChrome } from './browser.js';
 import { exportListEmails, importCsv } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
 import { readCsv, writeCsv, onlyEmailAndResult, filterByResult, dropColumns, dropRowsByColumnValue } from './csv-utils.js';
+import { writeRowsAsXlsx } from './xlsx-utils.js';
+import { buildOutputXlsxPath } from './filename-utils.js';
 import { logger } from './logger.js';
 import { captureCrashDiagnostics } from './diagnostics.js';
 
@@ -18,7 +20,7 @@ export interface FlowResult {
   rawExportPath: string;
   debounceResultPath: string;
   reimportPath: string;
-  safePath: string;
+  masterXlsxPath: string;
   riskyPath: string;
 }
 
@@ -50,7 +52,7 @@ async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts
   throw lastErr;
 }
 
-export async function runFlow(apolloListUrl: string): Promise<FlowResult> {
+export async function runFlow(apolloListUrl: string, outputFileName?: string): Promise<FlowResult> {
   // 1-2. Apollo: xoá filter, chọn tất cả, export email -> tải file CSV thô (tự thử lại nếu Chrome crash)
   const rawExportPath = await exportWithRetry(apolloListUrl, DOWNLOAD_DIR);
 
@@ -72,7 +74,7 @@ export async function runFlow(apolloListUrl: string): Promise<FlowResult> {
   // 3. Verify email qua Debounce -> file có thêm cột RESULT
   const debounceResultPath = await verifyListViaApi(cleanedExportPath, PROCESSED_DIR);
 
-  return runFromDebounceResult(debounceResultPath, rawExportPath);
+  return runFromDebounceResult(debounceResultPath, rawExportPath, outputFileName);
 }
 
 /**
@@ -83,6 +85,7 @@ export async function runFlow(apolloListUrl: string): Promise<FlowResult> {
 export async function runFromDebounceResult(
   debounceResultPath: string,
   rawExportPath = debounceResultPath,
+  outputFileName?: string,
 ): Promise<FlowResult> {
   const debounceRows = readCsv(debounceResultPath);
 
@@ -98,20 +101,18 @@ export async function runFromDebounceResult(
     await importContext.close();
   }
 
-  // 5. Từ file gốc: bỏ Invalid + Unknown, chỉ giữ Safe to Send + Risky
-  const filteredRows = filterByResult(debounceRows, ['Safe to Send', 'Risky']);
+  // 5. Giữ nguyên "file gốc" sau Debounce (TẤT CẢ row, mọi cột + cột RESULT) dạng Excel, đặt tên
+  // theo `outputFileName` team nhập — để team tự chỉnh sửa tiếp bằng tay sau này (không còn tách
+  // riêng file Safe to Send như trước).
+  const masterXlsxPath = buildOutputXlsxPath(PROCESSED_DIR, outputFileName);
+  writeRowsAsXlsx(masterXlsxPath, debounceRows, 'Leads');
+  logger.info(`Đã lưu file gốc sau Debounce dạng Excel: ${masterXlsxPath}`);
 
-  // 6. Tách thành 2 file riêng: chỉ Safe to Send / chỉ Risky
-  const safeRows = filterByResult(filteredRows, ['Safe to Send']);
-  const riskyRows = filterByResult(filteredRows, ['Risky']);
-
-  const safePath = path.join(PROCESSED_DIR, `safe-to-send-${Date.now()}.csv`);
+  // 6. Vẫn tách riêng các lead Risky ra 1 file CSV riêng để xử lý tiếp (luồng Teams/Gmail/meetscript.io).
+  const riskyRows = filterByResult(debounceRows, ['Risky']);
   const riskyPath = path.join(PROCESSED_DIR, `risky-${Date.now()}.csv`);
-  writeCsv(safePath, safeRows);
   writeCsv(riskyPath, riskyRows);
 
-  // KHÔNG upload file Safe to Send lên Drive ở giai đoạn này nữa — việc upload sẽ chuyển sang 1
-  // giai đoạn khác ở sau (theo yêu cầu mới), file safePath vẫn được tạo ra sẵn để dùng ở đó.
-  logger.info(`Hoàn tất luồng. File Safe to Send: ${safePath}. File Risky chờ xử lý tiếp (luồng nội bộ khác): ${riskyPath}`);
-  return { rawExportPath, debounceResultPath, reimportPath, safePath, riskyPath };
+  logger.info(`Hoàn tất luồng. File Excel: ${masterXlsxPath}. File Risky chờ xử lý tiếp (luồng nội bộ khác): ${riskyPath}`);
+  return { rawExportPath, debounceResultPath, reimportPath, masterXlsxPath, riskyPath };
 }

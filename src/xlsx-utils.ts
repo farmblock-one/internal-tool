@@ -1,4 +1,17 @@
 import * as XLSX from 'xlsx';
+import type { Row } from './csv-utils.js';
+
+/**
+ * Chuyển nguyên 1 bộ row CSV (mọi cột, giữ nguyên tên cột) thành file Excel — dùng để lưu lại
+ * "file gốc" sau khi verify Debounce (tất cả lead, mọi cột + cột RESULT) để team tự chỉnh sửa
+ * tiếp bằng tay, thay vì tách ra file Safe to Send riêng như trước.
+ */
+export function writeRowsAsXlsx(filePath: string, rows: Row[], sheetName = 'Data'): void {
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+  XLSX.writeFile(workbook, filePath);
+}
 
 /**
  * Tạo file Excel đúng định dạng meetscript.io yêu cầu để upload file Risky:

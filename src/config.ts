@@ -20,4 +20,8 @@ export const config = {
     return required('PUBLIC_HOST', process.env.PUBLIC_HOST);
   },
   fileServePort: Number(process.env.FILE_SERVE_PORT ?? '8443'),
+  // Mật khẩu dùng chung cho web UI (npm run web) — VM có IP công khai nên LUÔN nên đặt, nếu để
+  // trống thì web UI sẽ không yêu cầu đăng nhập (chỉ hợp lý nếu firewall đã tự giới hạn truy cập).
+  webuiPassword: process.env.WEBUI_PASSWORD ?? '',
+  webuiPort: Number(process.env.WEBUI_PORT ?? '8090'),
 };

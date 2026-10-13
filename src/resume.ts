@@ -2,12 +2,13 @@ import { runFromDebounceResult } from './pipeline.js';
 import { logger } from './logger.js';
 
 const debounceResultPath = process.argv[2];
+const outputFileName = process.argv[3];
 if (!debounceResultPath) {
-  console.error('Cách dùng: npm run resume -- <đường-dẫn-file-debounce-result.csv>');
+  console.error('Cách dùng: npm run resume -- <đường-dẫn-file-debounce-result.csv> [tên-file-output]');
   process.exit(1);
 }
 
-runFromDebounceResult(debounceResultPath)
+runFromDebounceResult(debounceResultPath, undefined, outputFileName)
   .then((result) => {
     logger.info('Kết quả:', result);
   })

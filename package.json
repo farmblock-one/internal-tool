@@ -7,6 +7,7 @@
     "build": "tsc -p .",
     "flow": "tsx src/run.ts",
     "resume": "tsx src/resume.ts",
+    "web": "tsx src/server.ts",
     "risky": "tsx src/process-risky.ts",
     "apollo:login": "tsx src/login-apollo.ts",
     "teams:login": "tsx src/login-teams.ts"
