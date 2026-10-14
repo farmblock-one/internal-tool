@@ -24,4 +24,7 @@ export const config = {
   // trống thì web UI sẽ không yêu cầu đăng nhập (chỉ hợp lý nếu firewall đã tự giới hạn truy cập).
   webuiPassword: process.env.WEBUI_PASSWORD ?? '',
   webuiPort: Number(process.env.WEBUI_PORT ?? '8090'),
+  // Mặc định CHỈ lắng nghe trên localhost — đứng sau 1 reverse proxy (Caddy) lo phần HTTPS thật +
+  // là cổng public duy nhất, Node không cần (và không nên) lộ trực tiếp ra ngoài Internet nữa.
+  webuiHost: process.env.WEBUI_HOST ?? '127.0.0.1',
 };

@@ -103,15 +103,52 @@ kết quả ngay trên trình duyệt — không cần biết dòng lệnh.
 npm run web
 ```
 
-Mở `http://<IP_SERVER>:8090/` (hoặc port khác nếu đổi `WEBUI_PORT`). Nhớ:
-- Mở port đó trên firewall: `sudo ufw allow 8090`
-- **Đặt `WEBUI_PASSWORD` trong `.env` trước khi chạy** — VM có IP công khai, không đặt mật khẩu
-  thì bất kỳ ai biết địa chỉ cũng chạy được luồng (tốn tiền Apollo/Debounce thật). Trình duyệt sẽ
-  tự hỏi mật khẩu 1 lần (không cần tên đăng nhập, để trống hoặc gõ gì cũng được).
+Mặc định `WEBUI_HOST=127.0.0.1` — web chỉ nghe trên chính server, chưa truy cập được từ bên ngoài.
+Cách khuyến nghị là setup Caddy để có HTTPS thật (xem mục ngay dưới) rồi truy cập qua
+`https://<domain>/`. Nhớ:
+- **Đặt `WEBUI_PASSWORD` trong `.env` trước khi chạy** — không đặt mật khẩu thì bất kỳ ai vào được
+  trang cũng chạy được luồng (tốn tiền Apollo/Debounce thật). Trình duyệt sẽ tự hỏi mật khẩu 1 lần
+  (không cần tên đăng nhập, để trống hoặc gõ gì cũng được).
 - Web UI chỉ chạy 1 luồng tại 1 thời điểm (xếp hàng lần lượt) vì tất cả dùng chung 1 Chrome
   profile đã đăng nhập Apollo — chạy song song sẽ làm nhau crash.
 - Danh sách job hiện chỉ lưu trong bộ nhớ — tắt/khởi động lại server sẽ mất lịch sử hiển thị trên
   web (các file kết quả trên đĩa thì KHÔNG mất, vẫn nằm trong `data/processed/`).
+
+### HTTPS thật qua Caddy (khuyến nghị)
+
+Trình duyệt luôn cảnh báo "Your connection to this site is not private" khi nhập mật khẩu qua
+`http://` (không mã hoá) — Caddy là 1 reverse proxy tự động xin + tự gia hạn chứng chỉ HTTPS miễn
+phí (Let's Encrypt), đứng trước web UI để xử lý phần này, gần như không cần cấu hình tay.
+
+Dùng được ngay tên miền đã có sẵn trong `.env` (`PUBLIC_HOST`, vd `103-252-122-224.sslip.io` —
+dịch vụ sslip.io tự trỏ tên miền về đúng IP của bạn, dùng được với Let's Encrypt như tên miền thật).
+
+```bash
+# 1. Cài Caddy (1 lần)
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install -y caddy
+
+# 2. Cấu hình Caddy trỏ về web UI chạy ở localhost:8090
+# (thay 103-252-122-224.sslip.io bằng đúng giá trị PUBLIC_HOST trong .env của bạn)
+sudo tee /etc/caddy/Caddyfile > /dev/null <<'EOF'
+103-252-122-224.sslip.io {
+    reverse_proxy localhost:8090
+}
+EOF
+sudo systemctl reload caddy
+
+# 3. Mở đúng 2 port Caddy cần (80 để xin chứng chỉ, 443 để phục vụ HTTPS) — KHÔNG mở port 8090
+sudo ufw allow 80
+sudo ufw allow 443
+sudo ufw delete allow 8090   # nếu trước đó đã lỡ mở
+```
+
+Sau đó truy cập `https://103-252-122-224.sslip.io/` (thay đúng domain của bạn) — Caddy tự xin
+chứng chỉ trong vài giây, không còn cảnh báo "not private" nữa. `WEBUI_HOST=127.0.0.1` giữ
+nguyên — web UI giờ chỉ nhận request từ Caddy trên chính máy, không lộ trực tiếp ra ngoài.
 
 ### Chạy nền vĩnh viễn qua systemd (để team dùng được bất cứ lúc nào, không cần bạn giữ SSH mở)
 

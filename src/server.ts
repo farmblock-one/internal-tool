@@ -291,6 +291,10 @@ const server = http.createServer((req, res) => {
 
 fs.mkdirSync(PROCESSED_DIR, { recursive: true });
 
-server.listen(config.webuiPort, '0.0.0.0', () => {
-  logger.info(`Web UI đang chạy tại http://0.0.0.0:${config.webuiPort}/` + (config.webuiPassword ? ' (yêu cầu mật khẩu)' : ' (KHÔNG có mật khẩu — ai cũng vào được)'));
+server.listen(config.webuiPort, config.webuiHost, () => {
+  logger.info(
+    `Web UI đang chạy tại http://${config.webuiHost}:${config.webuiPort}/ ` +
+      `(${config.webuiHost === '127.0.0.1' ? 'chỉ localhost — truy cập thật qua Caddy (HTTPS)' : 'lắng nghe công khai'})` +
+      (config.webuiPassword ? ', yêu cầu mật khẩu.' : ', KHÔNG có mật khẩu — ai cũng vào được.'),
+  );
 });
