@@ -8,6 +8,7 @@ import { logger } from './logger.js';
 import { config } from './config.js';
 
 const PROCESSED_DIR = path.resolve('data/processed');
+const ASSETS_DIR = path.resolve('assets');
 
 interface Job {
   id: string;
@@ -92,6 +93,8 @@ function requireAuth(req: http.IncomingMessage, res: http.ServerResponse): boole
   return false;
 }
 
+const BRAND_NAME = 'Tool lọc leads tự động';
+
 function pageLayout(title: string, body: string): string {
   return `<!doctype html>
 <html lang="vi">
@@ -99,25 +102,98 @@ function pageLayout(title: string, body: string): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(title)}</title>
+<link rel="icon" type="image/png" href="/assets/nsc-favicon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <style>
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; color: #1a1a1a; }
-  h1 { font-size: 1.4rem; }
-  label { display: block; margin-top: 12px; font-weight: 600; }
-  input[type=text], input[type=url] { width: 100%; padding: 8px; font-size: 1rem; box-sizing: border-box; margin-top: 4px; }
-  button { margin-top: 16px; padding: 10px 20px; font-size: 1rem; cursor: pointer; }
-  table { border-collapse: collapse; width: 100%; margin-top: 16px; }
-  td, th { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 0.9rem; }
-  .status { padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; color: #fff; display: inline-block; }
-  .status-queued { background: #888; }
+  :root {
+    --nsc-light: #36c3dc;
+    --nsc-dark: #0081bb;
+    --nsc-gray-900: #1a1a1a;
+    --nsc-gray-600: #5a6472;
+    --nsc-gray-200: #e4e9ee;
+    --nsc-gray-050: #f4f8fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Montserrat', -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 0;
+    padding: 0;
+    color: var(--nsc-gray-900);
+    background: var(--nsc-gray-050);
+  }
+  .nsc-header {
+    background: linear-gradient(135deg, var(--nsc-dark) 0%, var(--nsc-light) 55%, var(--nsc-dark) 100%);
+    padding: 28px 20px;
+    color: #fff;
+  }
+  .nsc-header-inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .nsc-header img { height: 32px; width: auto; display: block; }
+  .nsc-header h1 { font-size: 1.25rem; font-weight: 700; margin: 0; letter-spacing: 0.01em; }
+  .nsc-main { max-width: 760px; margin: 0 auto; padding: 28px 20px 48px; }
+  h2 {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--nsc-dark);
+    margin: 28px 0 10px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--nsc-light);
+  }
+  label { display: block; margin-top: 14px; font-weight: 600; font-size: 0.9rem; color: var(--nsc-gray-900); }
+  input[type=text], input[type=url] {
+    width: 100%; padding: 10px 12px; font-size: 1rem; font-family: inherit;
+    box-sizing: border-box; margin-top: 6px; border: 1.5px solid var(--nsc-gray-200);
+    border-radius: 8px; background: #fff; color: var(--nsc-gray-900);
+  }
+  input[type=text]:focus, input[type=url]:focus {
+    outline: none; border-color: var(--nsc-light); box-shadow: 0 0 0 3px rgba(54,195,220,0.2);
+  }
+  button {
+    margin-top: 20px; padding: 11px 26px; font-size: 0.95rem; font-weight: 600; font-family: inherit;
+    cursor: pointer; color: #fff; background: var(--nsc-dark); border: none; border-radius: 8px;
+    transition: background 0.15s ease;
+  }
+  button:hover { background: var(--nsc-light); }
+  .nsc-card {
+    background: #fff; border: 1px solid var(--nsc-gray-200); border-radius: 12px;
+    padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  table { border-collapse: collapse; width: 100%; margin-top: 4px; }
+  th { background: var(--nsc-gray-050); color: var(--nsc-gray-600); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  td, th { border-bottom: 1px solid var(--nsc-gray-200); padding: 10px 8px; text-align: left; font-size: 0.9rem; }
+  tr:last-child td { border-bottom: none; }
+  .status { padding: 3px 10px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; color: #fff; display: inline-block; }
+  .status-queued { background: #8a94a3; }
   .status-running { background: #e3a008; }
-  .status-done { background: #16a34a; }
-  .status-error { background: #dc2626; }
-  pre { background: #111; color: #eee; padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; font-size: 0.82rem; max-height: 60vh; overflow-y: auto; }
-  a { color: #2563eb; }
+  .status-done { background: #1a9d6c; }
+  .status-error { background: #d33a3a; }
+  pre {
+    background: #102330; color: #d9e8ef; padding: 14px; border-radius: 8px; overflow-x: auto;
+    white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; max-height: 60vh; overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  a { color: var(--nsc-dark); font-weight: 600; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .nsc-banner {
+    background: #fff6e0; border: 1px solid #e3a008; padding: 14px 18px; border-radius: 10px; margin-bottom: 20px;
+  }
+  .nsc-banner ul { margin: 8px 0 0; padding-left: 20px; }
+  .nsc-banner p { margin: 8px 0 0; font-size: 0.88rem; color: var(--nsc-gray-600); }
+  .nsc-error { color: #d33a3a; background: #fdeeee; border: 1px solid #d33a3a; border-radius: 10px; padding: 12px 16px; }
+  .nsc-back { display: inline-block; margin-bottom: 16px; font-size: 0.88rem; }
 </style>
 </head>
 <body>
+<div class="nsc-header">
+  <div class="nsc-header-inner">
+    <img src="/assets/nsc-logo-white.png" alt="NSC Software" />
+    <h1>${BRAND_NAME}</h1>
+  </div>
+</div>
+<div class="nsc-main">
 ${body}
+</div>
 </body>
 </html>`;
 }
@@ -131,9 +207,9 @@ function renderHome(): string {
 
   const banner =
     activeJobs.length > 0
-      ? `<div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px;border-radius:6px;margin-bottom:16px;">
+      ? `<div class="nsc-banner">
           <strong>⚠️ Đang có ${activeJobs.length} luồng đang chạy hoặc chờ chạy:</strong>
-          <ul style="margin:8px 0 0;padding-left:20px;">
+          <ul>
             ${activeJobs
               .map(
                 (j) =>
@@ -143,7 +219,7 @@ function renderHome(): string {
               )
               .join('')}
           </ul>
-          <p style="margin:8px 0 0;">Mỗi lần chỉ chạy 1 luồng — nếu bạn bấm "Bắt đầu chạy" bây giờ, luồng của bạn sẽ tự xếp hàng chờ (các) luồng trên chạy xong trước, không chạy song song được.</p>
+          <p>Mỗi lần chỉ chạy 1 luồng — nếu bạn bấm "Bắt đầu chạy" bây giờ, luồng của bạn sẽ tự xếp hàng chờ (các) luồng trên chạy xong trước, không chạy song song được.</p>
         </div>`
       : '';
 
@@ -159,22 +235,23 @@ function renderHome(): string {
 
   const body = `
 ${activeJobs.length > 0 ? '<meta http-equiv="refresh" content="5" />' : ''}
-<h1>Chạy luồng Apollo → Debounce</h1>
 ${banner}
-<form method="POST" action="/jobs">
-  <label for="listUrl">Link List Apollo</label>
-  <input type="url" id="listUrl" name="listUrl" placeholder="https://app.apollo.io/#/lists/..." required />
+<div class="nsc-card">
+  <form method="POST" action="/jobs">
+    <label for="listUrl">Link List Apollo</label>
+    <input type="url" id="listUrl" name="listUrl" placeholder="https://app.apollo.io/#/lists/..." required />
 
-  <label for="outputFileName">Tên file output mong muốn</label>
-  <input type="text" id="outputFileName" name="outputFileName" placeholder="VD: Leads-Thang10" required />
+    <label for="outputFileName">Tên file output mong muốn</label>
+    <input type="text" id="outputFileName" name="outputFileName" placeholder="VD: Leads-Thang10" required />
 
-  <button type="submit">Bắt đầu chạy</button>
-</form>
+    <button type="submit">Bắt đầu chạy</button>
+  </form>
+</div>
 
 <h2>Các lần chạy gần đây</h2>
-${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<table><tr><th>Tên file</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table>`}
+${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên file</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
 `;
-  return pageLayout('Internal Tool — Apollo Automation', body);
+  return pageLayout(BRAND_NAME, body);
 }
 
 function renderJob(job: Job): string {
@@ -186,20 +263,23 @@ function renderJob(job: Job): string {
           <a href="/jobs/${job.id}/download/risky">Tải file Risky CSV (${escapeHtml(path.basename(job.result.riskyPath))})</a>
         </p>`
       : '';
-  const errorBlock = job.status === 'error' ? `<p style="color:#dc2626"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</p>` : '';
+  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
 
   const body = `
 ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
-<p><a href="/">&larr; Quay lại</a></p>
-<h1>${escapeHtml(job.outputFileName || job.id)}</h1>
-<p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
-<p>List Apollo: ${escapeHtml(job.listUrl)}</p>
-${downloads}
-${errorBlock}
+<a class="nsc-back" href="/">&larr; Quay lại</a>
+<div class="nsc-card">
+  <p style="margin-top:0"><strong>${escapeHtml(job.outputFileName || job.id)}</strong></p>
+  <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
+  <p>List Apollo: ${escapeHtml(job.listUrl)}</p>
+  ${downloads}
+  ${errorBlock}
+</div>
+
 <h2>Log</h2>
 <pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
 `;
-  return pageLayout(`Job: ${job.outputFileName || job.id}`, body);
+  return pageLayout(`${job.outputFileName || job.id} — ${BRAND_NAME}`, body);
 }
 
 function serveDownload(res: http.ServerResponse, filePath: string): void {
@@ -229,6 +309,18 @@ const server = http.createServer((req, res) => {
     if (!requireAuth(req, res)) return;
 
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+
+    // Chỉ phục vụ đúng tên file khớp mẫu (không nhận path tuỳ ý) — tránh path traversal dù chỉ
+    // phục vụ vài file logo/favicon tĩnh của chính mình, không phải nội dung do người dùng đưa vào.
+    const assetMatch = url.pathname.match(/^\/assets\/([a-z0-9_-]+\.png)$/i);
+    if (req.method === 'GET' && assetMatch) {
+      const filePath = path.join(ASSETS_DIR, assetMatch[1]);
+      if (fs.existsSync(filePath)) {
+        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+        fs.createReadStream(filePath).pipe(res);
+        return;
+      }
+    }
 
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
