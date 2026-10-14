@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runFlow } from './pipeline.js';
+import { runRiskyFlow } from './risky-pipeline.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -11,25 +12,57 @@ import { isValidOutputFileName } from './filename-utils.js';
 const PROCESSED_DIR = path.resolve('data/processed');
 const ASSETS_DIR = path.resolve('assets');
 
-interface Job {
+interface JobBase {
   id: string;
-  listUrl: string;
-  outputFileName: string;
   status: 'queued' | 'running' | 'done' | 'error';
   logs: string[];
   createdAt: number;
   finishedAt?: number;
   error?: string;
+}
+
+interface MainJob extends JobBase {
+  kind: 'main';
+  listUrl: string;
+  outputFileName: string;
   result?: { masterXlsxPath: string; riskyPath: string };
+  // ID của job Risky đã được tạo ra từ job này (nếu có) — để không cho bấm tạo thêm lần nữa,
+  // tránh upload trùng cùng 1 danh sách Risky lên meetscript.io nhiều lần không cần thiết.
+  riskyJobId?: string;
+}
+
+interface RiskyJob extends JobBase {
+  kind: 'risky';
+  label: string;
+  riskyCsvPath: string;
+  sourceJobId?: string;
+  // File Risky rỗng (không có lead nào) -> coi là "done" nhưng không có gì để tải/xem.
+  empty?: boolean;
+  result?: { excelPath: string; teamResultScreenshot: string; googleResultScreenshot: string };
+}
+
+type Job = MainJob | RiskyJob;
+
+function jobLabel(job: Job): string {
+  return job.kind === 'main' ? job.outputFileName || job.id : job.label || job.id;
 }
 
 const jobs = new Map<string, Job>();
 const queue: string[] = [];
 let processing = false;
 
-function enqueueJob(listUrl: string, outputFileName: string): Job {
+function enqueueMainJob(listUrl: string, outputFileName: string): MainJob {
   const id = crypto.randomBytes(6).toString('hex');
-  const job: Job = { id, listUrl, outputFileName, status: 'queued', logs: [], createdAt: Date.now() };
+  const job: MainJob = { id, kind: 'main', listUrl, outputFileName, status: 'queued', logs: [], createdAt: Date.now() };
+  jobs.set(id, job);
+  queue.push(id);
+  void processQueue();
+  return job;
+}
+
+function enqueueRiskyJob(riskyCsvPath: string, label: string, sourceJobId?: string): RiskyJob {
+  const id = crypto.randomBytes(6).toString('hex');
+  const job: RiskyJob = { id, kind: 'risky', label, riskyCsvPath, sourceJobId, status: 'queued', logs: [], createdAt: Date.now() };
   jobs.set(id, job);
   queue.push(id);
   void processQueue();
@@ -49,8 +82,17 @@ async function processQueue(): Promise<void> {
       job.status = 'running';
       await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
         try {
-          const result = await runFlow(job.listUrl, job.outputFileName);
-          job.result = { masterXlsxPath: result.masterXlsxPath, riskyPath: result.riskyPath };
+          if (job.kind === 'main') {
+            const result = await runFlow(job.listUrl, job.outputFileName);
+            job.result = { masterXlsxPath: result.masterXlsxPath, riskyPath: result.riskyPath };
+          } else {
+            const result = await runRiskyFlow(job.riskyCsvPath);
+            if (result === null) {
+              job.empty = true;
+            } else {
+              job.result = result;
+            }
+          }
           job.status = 'done';
         } catch (err) {
           job.status = 'error';
@@ -216,7 +258,7 @@ function renderHome(errorMessage?: string): string {
             ${activeJobs
               .map(
                 (j) =>
-                  `<li><a href="/jobs/${j.id}">${escapeHtml(j.outputFileName || j.id)}</a> — ` +
+                  `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> — ` +
                   `<span class="status status-${j.status}">${j.status}</span> ` +
                   `(bắt đầu lúc ${new Date(j.createdAt).toLocaleString('vi-VN')})</li>`,
               )
@@ -229,7 +271,8 @@ function renderHome(errorMessage?: string): string {
   const rows = recentJobs
     .map(
       (j) => `<tr>
-        <td><a href="/jobs/${j.id}">${escapeHtml(j.outputFileName || j.id)}</a></td>
+        <td><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a></td>
+        <td>${j.kind === 'main' ? 'Apollo → Debounce' : 'Risky → Teams/Gmail'}</td>
         <td><span class="status status-${j.status}">${j.status}</span></td>
         <td>${new Date(j.createdAt).toLocaleString('vi-VN')}</td>
       </tr>`,
@@ -261,37 +304,65 @@ ${banner}
 </div>
 
 <h2>Các lần chạy gần đây</h2>
-${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên file</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
+${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên</th><th>Loại</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
 `;
   return pageLayout(BRAND_NAME, body);
 }
 
 function renderJob(job: Job): string {
   const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
-  const downloads =
-    job.status === 'done' && job.result
-      ? `<p>
+  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
+
+  let detailLines = '';
+  let resultBlock = '';
+
+  if (job.kind === 'main') {
+    detailLines = `<p>List Apollo: ${escapeHtml(job.listUrl)}</p>`;
+    if (job.status === 'done' && job.result) {
+      // Chỉ cho bấm "Xử lý tiếp Risky" 1 lần — bấm thêm lần nữa sẽ upload trùng cùng 1 danh sách
+      // lên meetscript.io, không cần thiết. Nếu đã làm rồi thì dẫn thẳng tới job Risky đó.
+      const riskyAction = job.riskyJobId
+        ? `<p><a href="/jobs/${job.riskyJobId}">Xem kết quả xử lý Risky &rarr;</a></p>`
+        : `<form method="POST" action="/jobs/${job.id}/risky" style="margin-top:4px">
+             <button type="submit">Xử lý tiếp Risky (Teams/Gmail &rarr; meetscript.io)</button>
+           </form>`;
+      resultBlock = `
+        <p>
           <a href="/jobs/${job.id}/download/xlsx">Tải file Excel (${escapeHtml(path.basename(job.result.masterXlsxPath))})</a><br/>
           <a href="/jobs/${job.id}/download/risky">Tải file Risky CSV (${escapeHtml(path.basename(job.result.riskyPath))})</a>
-        </p>`
-      : '';
-  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
+        </p>
+        ${riskyAction}
+      `;
+    }
+  } else {
+    detailLines = `<p>File Risky nguồn: ${escapeHtml(path.basename(job.riskyCsvPath))}</p>`;
+    if (job.status === 'done' && job.empty) {
+      resultBlock = `<p>File Risky này không có lead nào — không cần xử lý gì thêm.</p>`;
+    } else if (job.status === 'done' && job.result) {
+      resultBlock = `
+        <p><strong>Kết quả tab TEAM:</strong></p>
+        <img src="/jobs/${job.id}/screenshot/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+        <p style="margin-top:16px"><strong>Kết quả tab GOOGLE:</strong></p>
+        <img src="/jobs/${job.id}/screenshot/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+      `;
+    }
+  }
 
   const body = `
 ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 <a class="nsc-back" href="/">&larr; Quay lại</a>
 <div class="nsc-card">
-  <p style="margin-top:0"><strong>${escapeHtml(job.outputFileName || job.id)}</strong></p>
+  <p style="margin-top:0"><strong>${escapeHtml(jobLabel(job))}</strong></p>
   <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
-  <p>List Apollo: ${escapeHtml(job.listUrl)}</p>
-  ${downloads}
+  ${detailLines}
+  ${resultBlock}
   ${errorBlock}
 </div>
 
 <h2>Log</h2>
 <pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
 `;
-  return pageLayout(`${job.outputFileName || job.id} — ${BRAND_NAME}`, body);
+  return pageLayout(`${jobLabel(job)} — ${BRAND_NAME}`, body);
 }
 
 function serveDownload(res: http.ServerResponse, filePath: string): void {
@@ -356,8 +427,28 @@ const server = http.createServer((req, res) => {
         res.end();
         return;
       }
-      const job = enqueueJob(listUrl, outputFileName);
+      const job = enqueueMainJob(listUrl, outputFileName);
       res.writeHead(303, { Location: `/jobs/${job.id}` });
+      res.end();
+      return;
+    }
+
+    const riskyTriggerMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/risky$/);
+    if (req.method === 'POST' && riskyTriggerMatch) {
+      const sourceJob = jobs.get(riskyTriggerMatch[1]);
+      if (!sourceJob || sourceJob.kind !== 'main' || sourceJob.status !== 'done' || !sourceJob.result) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Không thể xử lý Risky — job nguồn chưa chạy xong hoặc không hợp lệ.');
+        return;
+      }
+      if (sourceJob.riskyJobId) {
+        res.writeHead(303, { Location: `/jobs/${sourceJob.riskyJobId}` });
+        res.end();
+        return;
+      }
+      const riskyJob = enqueueRiskyJob(sourceJob.result.riskyPath, `Risky — ${sourceJob.outputFileName}`, sourceJob.id);
+      sourceJob.riskyJobId = riskyJob.id;
+      res.writeHead(303, { Location: `/jobs/${riskyJob.id}` });
       res.end();
       return;
     }
@@ -378,13 +469,32 @@ const server = http.createServer((req, res) => {
     const downloadMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/download\/(xlsx|risky)$/);
     if (req.method === 'GET' && downloadMatch) {
       const job = jobs.get(downloadMatch[1]);
-      if (!job?.result) {
+      if (job?.kind !== 'main' || !job.result) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy file để tải.');
         return;
       }
       const filePath = downloadMatch[2] === 'xlsx' ? job.result.masterXlsxPath : job.result.riskyPath;
       serveDownload(res, filePath);
+      return;
+    }
+
+    const screenshotMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/screenshot\/(team|google)$/);
+    if (req.method === 'GET' && screenshotMatch) {
+      const job = jobs.get(screenshotMatch[1]);
+      if (job?.kind !== 'risky' || !job.result) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Không tìm thấy ảnh kết quả.');
+        return;
+      }
+      const filePath = screenshotMatch[2] === 'team' ? job.result.teamResultScreenshot : job.result.googleResultScreenshot;
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Không tìm thấy ảnh kết quả (có thể server đã khởi động lại).');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      fs.createReadStream(filePath).pipe(res);
       return;
     }
 

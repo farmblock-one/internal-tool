@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
-import { exportListEmails, importCsv } from './apollo.js';
+import { exportListEmails } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
-import { readCsv, writeCsv, onlyEmailAndResult, filterByResult, dropColumns, dropRowsByColumnValue } from './csv-utils.js';
+import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue } from './csv-utils.js';
 import { writeRowsAsXlsx } from './xlsx-utils.js';
 import { buildOutputXlsxPath } from './filename-utils.js';
 import { logger } from './logger.js';
@@ -19,7 +19,6 @@ for (const dir of [DOWNLOAD_DIR, PROCESSED_DIR]) {
 export interface FlowResult {
   rawExportPath: string;
   debounceResultPath: string;
-  reimportPath: string;
   masterXlsxPath: string;
   riskyPath: string;
 }
@@ -89,17 +88,9 @@ export async function runFromDebounceResult(
 ): Promise<FlowResult> {
   const debounceRows = readCsv(debounceResultPath);
 
-  // 4. File để import ngược lại Apollo: chỉ giữ cột email + RESULT, TẤT CẢ các row
-  const reimportRows = onlyEmailAndResult(debounceRows);
-  const reimportPath = path.join(PROCESSED_DIR, `apollo-reimport-${Date.now()}.csv`);
-  writeCsv(reimportPath, reimportRows);
-
-  const importContext = await openPersistentChrome();
-  try {
-    await importCsv(importContext, reimportPath, DOWNLOAD_DIR);
-  } finally {
-    await importContext.close();
-  }
+  // 4. TẠM DỪNG bước import ngược lại Apollo (theo yêu cầu) — sẽ làm ở 1 giai đoạn sau, với 1 file
+  // khác đã qua thêm vài bước xử lý nữa, không phải ngay tại đây. `importCsv` trong apollo.ts vẫn
+  // còn nguyên, chỉ là chưa gọi tới trong luồng tự động này.
 
   // 5. Giữ nguyên "file gốc" sau Debounce (TẤT CẢ row, mọi cột + cột RESULT) dạng Excel, đặt tên
   // theo `outputFileName` team nhập — để team tự chỉnh sửa tiếp bằng tay sau này (không còn tách
@@ -114,5 +105,5 @@ export async function runFromDebounceResult(
   writeCsv(riskyPath, riskyRows);
 
   logger.info(`Hoàn tất luồng. File Excel: ${masterXlsxPath}. File Risky chờ xử lý tiếp (luồng nội bộ khác): ${riskyPath}`);
-  return { rawExportPath, debounceResultPath, reimportPath, masterXlsxPath, riskyPath };
+  return { rawExportPath, debounceResultPath, masterXlsxPath, riskyPath };
 }

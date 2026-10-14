@@ -41,7 +41,7 @@ export async function uploadRiskyToMeetscript(
   excelFilePath: string,
   downloadDir: string,
   tab: 'TEAM' | 'GOOGLE' = 'TEAM',
-): Promise<void> {
+): Promise<string> {
   const page = await context.newPage();
   try {
     await page.goto('https://seacher.meetscript.io/', { waitUntil: 'domcontentloaded' });
@@ -114,6 +114,7 @@ export async function uploadRiskyToMeetscript(
     }
 
     logger.info(`Đã bấm OK trên popup xác nhận: "${dialogMessage}" — ảnh: ${resultPath}`);
+    return resultPath;
   } catch (err) {
     const debugPath = `${downloadDir}/debug-meetscript-${tab.toLowerCase()}-${Date.now()}.png`;
     await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
