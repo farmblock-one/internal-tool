@@ -6,6 +6,7 @@ import { runFlow } from './pipeline.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
+import { isValidOutputFileName } from './filename-utils.js';
 
 const PROCESSED_DIR = path.resolve('data/processed');
 const ASSETS_DIR = path.resolve('assets');
@@ -198,12 +199,14 @@ ${body}
 </html>`;
 }
 
-function renderHome(): string {
+function renderHome(errorMessage?: string): string {
   const allJobs = [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
   // "running" chỉ có tối đa 1 job (processQueue chạy tuần tự), nhưng "queued" có thể nhiều người
   // cùng bấm — liệt kê hết để ai mở trang cũng thấy ngay đang có bao nhiêu người xếp hàng trước.
   const activeJobs = allJobs.filter((j) => j.status === 'queued' || j.status === 'running');
   const recentJobs = allJobs.slice(0, 20);
+
+  const errorBanner = errorMessage ? `<div class="nsc-error" style="margin-bottom:20px">${escapeHtml(errorMessage)}</div>` : '';
 
   const banner =
     activeJobs.length > 0
@@ -235,6 +238,7 @@ function renderHome(): string {
 
   const body = `
 ${activeJobs.length > 0 ? '<meta http-equiv="refresh" content="5" />' : ''}
+${errorBanner}
 ${banner}
 <div class="nsc-card">
   <form method="POST" action="/jobs">
@@ -242,7 +246,15 @@ ${banner}
     <input type="url" id="listUrl" name="listUrl" placeholder="https://app.apollo.io/#/lists/..." required />
 
     <label for="outputFileName">Tên file output mong muốn</label>
-    <input type="text" id="outputFileName" name="outputFileName" placeholder="VD: Leads-Thang10" required />
+    <input
+      type="text" id="outputFileName" name="outputFileName" placeholder="VD: Leads-Thang10"
+      pattern="[A-Za-z0-9-]+"
+      title="Chỉ chữ cái (không dấu), số và dấu gạch ngang (-) — không dấu cách, không ký tự đặc biệt khác"
+      required
+    />
+    <p style="margin:6px 0 0;font-size:0.78rem;color:var(--nsc-gray-600)">
+      Chỉ dùng chữ cái (không dấu), số và dấu gạch ngang (-) — không dấu cách, không ký tự đặc biệt khác.
+    </p>
 
     <button type="submit">Bắt đầu chạy</button>
   </form>
@@ -324,7 +336,7 @@ const server = http.createServer((req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(renderHome());
+      res.end(renderHome(url.searchParams.get('error') ?? undefined));
       return;
     }
 
@@ -333,9 +345,15 @@ const server = http.createServer((req, res) => {
       const params = new URLSearchParams(body);
       const listUrl = (params.get('listUrl') ?? '').trim();
       const outputFileName = (params.get('outputFileName') ?? '').trim();
+      let errorMessage: string | undefined;
       if (!listUrl || !outputFileName) {
-        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Thiếu link List Apollo hoặc tên file output.');
+        errorMessage = 'Thiếu link List Apollo hoặc tên file output.';
+      } else if (!isValidOutputFileName(outputFileName)) {
+        errorMessage = 'Tên file output không hợp lệ — chỉ được dùng chữ cái (không dấu), số và dấu gạch ngang (-), không dấu cách/ký tự đặc biệt khác.';
+      }
+      if (errorMessage) {
+        res.writeHead(303, { Location: `/?error=${encodeURIComponent(errorMessage)}` });
+        res.end();
         return;
       }
       const job = enqueueJob(listUrl, outputFileName);
