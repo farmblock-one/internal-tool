@@ -2,8 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { runFlow } from './pipeline.js';
-import { runRiskyFlow } from './risky-pipeline.js';
+import { runFlow, type FlowResult } from './pipeline.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -12,57 +11,27 @@ import { isValidOutputFileName } from './filename-utils.js';
 const PROCESSED_DIR = path.resolve('data/processed');
 const ASSETS_DIR = path.resolve('assets');
 
-interface JobBase {
+interface Job {
   id: string;
+  listUrl: string;
+  outputFileName: string;
   status: 'queued' | 'running' | 'done' | 'error';
   logs: string[];
   createdAt: number;
   finishedAt?: number;
   error?: string;
-}
-
-interface MainJob extends JobBase {
-  kind: 'main';
-  listUrl: string;
-  outputFileName: string;
-  result?: { masterXlsxPath: string; riskyPath: string };
-  // ID của job Risky đã được tạo ra từ job này (nếu có) — để không cho bấm tạo thêm lần nữa,
-  // tránh upload trùng cùng 1 danh sách Risky lên meetscript.io nhiều lần không cần thiết.
-  riskyJobId?: string;
-}
-
-interface RiskyJob extends JobBase {
-  kind: 'risky';
-  label: string;
-  riskyCsvPath: string;
-  sourceJobId?: string;
-  // File Risky rỗng (không có lead nào) -> coi là "done" nhưng không có gì để tải/xem.
-  empty?: boolean;
-  result?: { excelPath: string; teamResultScreenshot: string; googleResultScreenshot: string };
-}
-
-type Job = MainJob | RiskyJob;
-
-function jobLabel(job: Job): string {
-  return job.kind === 'main' ? job.outputFileName || job.id : job.label || job.id;
+  // 1 luồng liền mạch: Apollo -> Debounce -> file Excel/Risky -> ngay lập tức xử lý tiếp Risky
+  // (Teams/Gmail -> meetscript.io), không cần bấm nút nào thêm. `result` chỉ có khi status='done'.
+  result?: FlowResult;
 }
 
 const jobs = new Map<string, Job>();
 const queue: string[] = [];
 let processing = false;
 
-function enqueueMainJob(listUrl: string, outputFileName: string): MainJob {
+function enqueueJob(listUrl: string, outputFileName: string): Job {
   const id = crypto.randomBytes(6).toString('hex');
-  const job: MainJob = { id, kind: 'main', listUrl, outputFileName, status: 'queued', logs: [], createdAt: Date.now() };
-  jobs.set(id, job);
-  queue.push(id);
-  void processQueue();
-  return job;
-}
-
-function enqueueRiskyJob(riskyCsvPath: string, label: string, sourceJobId?: string): RiskyJob {
-  const id = crypto.randomBytes(6).toString('hex');
-  const job: RiskyJob = { id, kind: 'risky', label, riskyCsvPath, sourceJobId, status: 'queued', logs: [], createdAt: Date.now() };
+  const job: Job = { id, listUrl, outputFileName, status: 'queued', logs: [], createdAt: Date.now() };
   jobs.set(id, job);
   queue.push(id);
   void processQueue();
@@ -82,17 +51,7 @@ async function processQueue(): Promise<void> {
       job.status = 'running';
       await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
         try {
-          if (job.kind === 'main') {
-            const result = await runFlow(job.listUrl, job.outputFileName);
-            job.result = { masterXlsxPath: result.masterXlsxPath, riskyPath: result.riskyPath };
-          } else {
-            const result = await runRiskyFlow(job.riskyCsvPath);
-            if (result === null) {
-              job.empty = true;
-            } else {
-              job.result = result;
-            }
-          }
+          job.result = await runFlow(job.listUrl, job.outputFileName);
           job.status = 'done';
         } catch (err) {
           job.status = 'error';
@@ -258,7 +217,7 @@ function renderHome(errorMessage?: string): string {
             ${activeJobs
               .map(
                 (j) =>
-                  `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> — ` +
+                  `<li><a href="/jobs/${j.id}">${escapeHtml(j.outputFileName || j.id)}</a> — ` +
                   `<span class="status status-${j.status}">${j.status}</span> ` +
                   `(bắt đầu lúc ${new Date(j.createdAt).toLocaleString('vi-VN')})</li>`,
               )
@@ -271,8 +230,7 @@ function renderHome(errorMessage?: string): string {
   const rows = recentJobs
     .map(
       (j) => `<tr>
-        <td><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a></td>
-        <td>${j.kind === 'main' ? 'Apollo → Debounce' : 'Risky → Teams/Gmail'}</td>
+        <td><a href="/jobs/${j.id}">${escapeHtml(j.outputFileName || j.id)}</a></td>
         <td><span class="status status-${j.status}">${j.status}</span></td>
         <td>${new Date(j.createdAt).toLocaleString('vi-VN')}</td>
       </tr>`,
@@ -304,7 +262,7 @@ ${banner}
 </div>
 
 <h2>Các lần chạy gần đây</h2>
-${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên</th><th>Loại</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
+${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên file</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
 `;
   return pageLayout(BRAND_NAME, body);
 }
@@ -313,48 +271,41 @@ function renderJob(job: Job): string {
   const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
   const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
 
-  let detailLines = '';
   let resultBlock = '';
-
-  if (job.kind === 'main') {
-    detailLines = `<p>List Apollo: ${escapeHtml(job.listUrl)}</p>`;
-    if (job.status === 'done' && job.result) {
-      // Chỉ cho bấm "Xử lý tiếp Risky" 1 lần — bấm thêm lần nữa sẽ upload trùng cùng 1 danh sách
-      // lên meetscript.io, không cần thiết. Nếu đã làm rồi thì dẫn thẳng tới job Risky đó.
-      const riskyAction = job.riskyJobId
-        ? `<p><a href="/jobs/${job.riskyJobId}">Xem kết quả xử lý Risky &rarr;</a></p>`
-        : `<form method="POST" action="/jobs/${job.id}/risky" style="margin-top:4px">
-             <button type="submit">Xử lý tiếp Risky (Teams/Gmail &rarr; meetscript.io)</button>
-           </form>`;
-      resultBlock = `
-        <p>
-          <a href="/jobs/${job.id}/download/xlsx">Tải file Excel (${escapeHtml(path.basename(job.result.masterXlsxPath))})</a><br/>
-          <a href="/jobs/${job.id}/download/risky">Tải file Risky CSV (${escapeHtml(path.basename(job.result.riskyPath))})</a>
-        </p>
-        ${riskyAction}
-      `;
-    }
-  } else {
-    detailLines = `<p>File Risky nguồn: ${escapeHtml(path.basename(job.riskyCsvPath))}</p>`;
-    if (job.status === 'done' && job.empty) {
-      resultBlock = `<p>File Risky này không có lead nào — không cần xử lý gì thêm.</p>`;
-    } else if (job.status === 'done' && job.result) {
-      resultBlock = `
-        <p><strong>Kết quả tab TEAM:</strong></p>
-        <img src="/jobs/${job.id}/screenshot/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
-        <p style="margin-top:16px"><strong>Kết quả tab GOOGLE:</strong></p>
-        <img src="/jobs/${job.id}/screenshot/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
-      `;
-    }
+  if (job.status === 'done' && job.result) {
+    const { result } = job;
+    const riskyBlock =
+      result.riskyResult === null
+        ? `<p style="margin-top:16px">File Risky không có lead nào — không cần xử lý gì thêm.</p>`
+        : result.riskyResult
+          ? `<div style="margin-top:16px">
+              <p><strong>Đã xử lý xong Risky — kết quả thật (2 file Excel Team/Google) sẽ được bot Telegram gửi riêng.</strong></p>
+              <p>Ảnh xác nhận upload tab TEAM:</p>
+              <img src="/jobs/${job.id}/screenshot/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+              <p style="margin-top:12px">Ảnh xác nhận upload tab GOOGLE:</p>
+              <img src="/jobs/${job.id}/screenshot/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+            </div>`
+          : '';
+    const riskyErrorBlock = result.riskyError
+      ? `<div class="nsc-error" style="margin-top:16px"><strong>Bước xử lý Risky bị lỗi:</strong> ${escapeHtml(result.riskyError)}<br/>(File Excel/Risky CSV ở trên vẫn dùng được bình thường — chỉ cần xử lý lại riêng phần Risky.)</div>`
+      : '';
+    resultBlock = `
+      <p>
+        <a href="/jobs/${job.id}/download/xlsx">Tải file Excel (${escapeHtml(path.basename(result.masterXlsxPath))})</a><br/>
+        <a href="/jobs/${job.id}/download/risky">Tải file Risky CSV (${escapeHtml(path.basename(result.riskyPath))})</a>
+      </p>
+      ${riskyBlock}
+      ${riskyErrorBlock}
+    `;
   }
 
   const body = `
 ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 <a class="nsc-back" href="/">&larr; Quay lại</a>
 <div class="nsc-card">
-  <p style="margin-top:0"><strong>${escapeHtml(jobLabel(job))}</strong></p>
+  <p style="margin-top:0"><strong>${escapeHtml(job.outputFileName || job.id)}</strong></p>
   <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
-  ${detailLines}
+  <p>List Apollo: ${escapeHtml(job.listUrl)}</p>
   ${resultBlock}
   ${errorBlock}
 </div>
@@ -362,7 +313,7 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 <h2>Log</h2>
 <pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
 `;
-  return pageLayout(`${jobLabel(job)} — ${BRAND_NAME}`, body);
+  return pageLayout(`${job.outputFileName || job.id} — ${BRAND_NAME}`, body);
 }
 
 function serveDownload(res: http.ServerResponse, filePath: string): void {
@@ -427,28 +378,8 @@ const server = http.createServer((req, res) => {
         res.end();
         return;
       }
-      const job = enqueueMainJob(listUrl, outputFileName);
+      const job = enqueueJob(listUrl, outputFileName);
       res.writeHead(303, { Location: `/jobs/${job.id}` });
-      res.end();
-      return;
-    }
-
-    const riskyTriggerMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/risky$/);
-    if (req.method === 'POST' && riskyTriggerMatch) {
-      const sourceJob = jobs.get(riskyTriggerMatch[1]);
-      if (!sourceJob || sourceJob.kind !== 'main' || sourceJob.status !== 'done' || !sourceJob.result) {
-        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Không thể xử lý Risky — job nguồn chưa chạy xong hoặc không hợp lệ.');
-        return;
-      }
-      if (sourceJob.riskyJobId) {
-        res.writeHead(303, { Location: `/jobs/${sourceJob.riskyJobId}` });
-        res.end();
-        return;
-      }
-      const riskyJob = enqueueRiskyJob(sourceJob.result.riskyPath, `Risky — ${sourceJob.outputFileName}`, sourceJob.id);
-      sourceJob.riskyJobId = riskyJob.id;
-      res.writeHead(303, { Location: `/jobs/${riskyJob.id}` });
       res.end();
       return;
     }
@@ -469,7 +400,7 @@ const server = http.createServer((req, res) => {
     const downloadMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/download\/(xlsx|risky)$/);
     if (req.method === 'GET' && downloadMatch) {
       const job = jobs.get(downloadMatch[1]);
-      if (job?.kind !== 'main' || !job.result) {
+      if (!job?.result) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy file để tải.');
         return;
@@ -482,12 +413,13 @@ const server = http.createServer((req, res) => {
     const screenshotMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/screenshot\/(team|google)$/);
     if (req.method === 'GET' && screenshotMatch) {
       const job = jobs.get(screenshotMatch[1]);
-      if (job?.kind !== 'risky' || !job.result) {
+      if (!job?.result?.riskyResult) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy ảnh kết quả.');
         return;
       }
-      const filePath = screenshotMatch[2] === 'team' ? job.result.teamResultScreenshot : job.result.googleResultScreenshot;
+      const filePath =
+        screenshotMatch[2] === 'team' ? job.result.riskyResult.teamResultScreenshot : job.result.riskyResult.googleResultScreenshot;
       if (!fs.existsSync(filePath)) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy ảnh kết quả (có thể server đã khởi động lại).');

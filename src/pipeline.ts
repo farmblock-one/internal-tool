@@ -6,6 +6,7 @@ import { verifyListViaApi } from './debounce.js';
 import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue } from './csv-utils.js';
 import { writeRowsAsXlsx } from './xlsx-utils.js';
 import { buildOutputXlsxPath } from './filename-utils.js';
+import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
 import { logger } from './logger.js';
 import { captureCrashDiagnostics } from './diagnostics.js';
 
@@ -21,6 +22,11 @@ export interface FlowResult {
   debounceResultPath: string;
   masterXlsxPath: string;
   riskyPath: string;
+  // null = file Risky không có lead nào, tự bỏ qua bước Teams/Gmail/meetscript.io.
+  riskyResult: RiskyFlowResult | null;
+  // Có giá trị nếu bước xử lý Risky bị lỗi — KHÔNG làm cả luồng thất bại (file Excel/Risky CSV ở
+  // trên vẫn dùng được bình thường), chỉ ghi lại để biết cần xử lý lại riêng phần Risky.
+  riskyError?: string;
 }
 
 /**
@@ -99,11 +105,24 @@ export async function runFromDebounceResult(
   writeRowsAsXlsx(masterXlsxPath, debounceRows, 'Leads');
   logger.info(`Đã lưu file gốc sau Debounce dạng Excel: ${masterXlsxPath}`);
 
-  // 6. Vẫn tách riêng các lead Risky ra 1 file CSV riêng để xử lý tiếp (luồng Teams/Gmail/meetscript.io).
+  // 6. Tách riêng các lead Risky ra 1 file CSV riêng.
   const riskyRows = filterByResult(debounceRows, ['Risky']);
   const riskyPath = path.join(PROCESSED_DIR, `risky-${Date.now()}.csv`);
   writeCsv(riskyPath, riskyRows);
+  logger.info(`Đã lưu file Risky: ${riskyPath}`);
 
-  logger.info(`Hoàn tất luồng. File Excel: ${masterXlsxPath}. File Risky chờ xử lý tiếp (luồng nội bộ khác): ${riskyPath}`);
-  return { rawExportPath, debounceResultPath, masterXlsxPath, riskyPath };
+  // 7. Luồng liền mạch — xử lý tiếp Risky NGAY (bắt cURL Teams/Gmail -> upload meetscript.io),
+  // không cần người khác bấm nút riêng. Lỗi ở bước này KHÔNG huỷ cả job: file Excel/Risky CSV ở
+  // trên vẫn dùng được bình thường dù bước Risky có trục trặc, chỉ ghi log lại để xử lý lại riêng.
+  let riskyResult: RiskyFlowResult | null = null;
+  let riskyError: string | undefined;
+  try {
+    riskyResult = await runRiskyFlow(riskyPath);
+  } catch (err) {
+    riskyError = err instanceof Error ? err.message : String(err);
+    logger.error('Lỗi khi xử lý tiếp Risky (Teams/Gmail/meetscript.io):', err);
+  }
+
+  logger.info(`Hoàn tất luồng. File Excel: ${masterXlsxPath}.`);
+  return { rawExportPath, debounceResultPath, masterXlsxPath, riskyPath, riskyResult, riskyError };
 }
