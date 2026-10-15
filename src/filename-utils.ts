@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Chỉ chữ cái (không dấu), số, và dấu "-" — không dấu cách, không ký tự đặc biệt khác. Bắt buộc
+// Chỉ chữ cái (không dấu), số, và dấu "_" — không dấu cách, không ký tự đặc biệt khác. Bắt buộc
 // theo yêu cầu, thay vì tự "làm sạch" tên người dùng nhập — để tên hiện trên web UI và tên file
 // thật trên đĩa LUÔN giống hệt nhau, tránh người dùng bất ngờ vì tên bị tự đổi khác đi.
-const OUTPUT_FILE_NAME_PATTERN = /^[A-Za-z0-9-]+$/;
+const OUTPUT_FILE_NAME_PATTERN = /^[A-Za-z0-9_]+$/;
 
 export function isValidOutputFileName(name: string): boolean {
   return OUTPUT_FILE_NAME_PATTERN.test(name);
@@ -20,14 +20,14 @@ export function buildOutputXlsxPath(dir: string, desiredName: string | undefined
   if (desiredName && desiredName.trim()) {
     if (!isValidOutputFileName(desiredName)) {
       throw new Error(
-        `Tên file output "${desiredName}" không hợp lệ — chỉ được dùng chữ cái, số và dấu "-", không dấu cách/ký tự đặc biệt.`,
+        `Tên file output "${desiredName}" không hợp lệ — chỉ được dùng chữ cái, số và dấu "_", không dấu cách/ký tự đặc biệt.`,
       );
     }
     base = desiredName;
   } else {
-    base = `output-${Date.now()}`;
+    base = `output_${Date.now()}`;
   }
   const direct = path.join(dir, `${base}.xlsx`);
   if (!fs.existsSync(direct)) return direct;
-  return path.join(dir, `${base}-${Date.now()}.xlsx`);
+  return path.join(dir, `${base}_${Date.now()}.xlsx`);
 }

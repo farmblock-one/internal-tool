@@ -248,13 +248,13 @@ ${banner}
 
     <label for="outputFileName">Tên file output mong muốn</label>
     <input
-      type="text" id="outputFileName" name="outputFileName" placeholder="VD: Leads-Thang10"
-      pattern="[A-Za-z0-9-]+"
-      title="Chỉ chữ cái (không dấu), số và dấu gạch ngang (-) — không dấu cách, không ký tự đặc biệt khác"
+      type="text" id="outputFileName" name="outputFileName" placeholder="VD: Leads_Thang10"
+      pattern="[A-Za-z0-9_]+"
+      title="Chỉ chữ cái (không dấu), số và dấu gạch dưới (_) — không dấu cách, không ký tự đặc biệt khác"
       required
     />
     <p style="margin:6px 0 0;font-size:0.78rem;color:var(--nsc-gray-600)">
-      Chỉ dùng chữ cái (không dấu), số và dấu gạch ngang (-) — không dấu cách, không ký tự đặc biệt khác.
+      Chỉ dùng chữ cái (không dấu), số và dấu gạch dưới (_) — không dấu cách, không ký tự đặc biệt khác.
     </p>
 
     <button type="submit">Bắt đầu chạy</button>
@@ -371,7 +371,7 @@ const server = http.createServer((req, res) => {
       if (!listUrl || !outputFileName) {
         errorMessage = 'Thiếu link List Apollo hoặc tên file output.';
       } else if (!isValidOutputFileName(outputFileName)) {
-        errorMessage = 'Tên file output không hợp lệ — chỉ được dùng chữ cái (không dấu), số và dấu gạch ngang (-), không dấu cách/ký tự đặc biệt khác.';
+        errorMessage = 'Tên file output không hợp lệ — chỉ được dùng chữ cái (không dấu), số và dấu gạch dưới (_), không dấu cách/ký tự đặc biệt khác.';
       }
       if (errorMessage) {
         res.writeHead(303, { Location: `/?error=${encodeURIComponent(errorMessage)}` });
