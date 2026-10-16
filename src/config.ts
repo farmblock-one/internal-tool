@@ -27,4 +27,8 @@ export const config = {
   // Mặc định CHỈ lắng nghe trên localhost — đứng sau 1 reverse proxy (Caddy) lo phần HTTPS thật +
   // là cổng public duy nhất, Node không cần (và không nên) lộ trực tiếp ra ngoài Internet nữa.
   webuiHost: process.env.WEBUI_HOST ?? '127.0.0.1',
+  // Để trống 1 trong 2 giá trị này -> bộ phận theo dõi kết quả Telegram tự tắt (không bắt buộc
+  // phải có để web UI còn lại hoạt động bình thường).
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
+  telegramChatId: process.env.TELEGRAM_CHAT_ID ?? '',
 };

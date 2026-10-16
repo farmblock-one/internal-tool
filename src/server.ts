@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
+import { startTelegramWatcher } from './telegram-watcher.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -450,6 +451,10 @@ const server = http.createServer((req, res) => {
 });
 
 fs.mkdirSync(PROCESSED_DIR, { recursive: true });
+
+// Chạy độc lập hoàn toàn với hàng đợi Chrome — chỉ gọi API Telegram thuần, không cần Chrome,
+// không chặn/bị chặn bởi các job khác.
+startTelegramWatcher();
 
 server.listen(config.webuiPort, config.webuiHost, () => {
   logger.info(

@@ -6,6 +6,7 @@ import { writeRiskyExcel } from './xlsx-utils.js';
 import { fetchTeamsSearchCurl } from './teams.js';
 import { fetchGmailLookupCurl } from './gmail.js';
 import { uploadRiskyToMeetscript } from './meetscript.js';
+import { registerExpectedTelegramFile } from './telegram-watcher.js';
 import { logger } from './logger.js';
 
 const DOWNLOAD_DIR = path.resolve('data/downloads');
@@ -81,7 +82,13 @@ export async function runRiskyFlow(riskyCsvPath: string): Promise<RiskyFlowResul
       logger.info(`Đã đổi phần ${index + 1}/${emailChunks.length} (${chunkEmails.length} lead) sang Excel: ${excelPath}`);
 
       const teamResultScreenshot = await uploadRiskyToMeetscript(context, teamsCurl, excelPath, DOWNLOAD_DIR, 'TEAM');
+      // Đăng ký "sổ chờ" ngay sau khi upload thành công — bộ phận theo dõi Telegram (chạy nền,
+      // tách biệt) sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi vào group.
+      registerExpectedTelegramFile(excelPath, 'TEAM');
+
       const googleResultScreenshot = await uploadRiskyToMeetscript(context, gmailCurl, excelPath, DOWNLOAD_DIR, 'GOOGLE');
+      registerExpectedTelegramFile(excelPath, 'GOOGLE');
+
       chunks.push({ excelPath, teamResultScreenshot, googleResultScreenshot });
     }
 
