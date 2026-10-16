@@ -11,16 +11,33 @@ import { logger } from './logger.js';
 const DOWNLOAD_DIR = path.resolve('data/downloads');
 const PROCESSED_DIR = path.resolve('data/processed');
 
-export interface RiskyFlowResult {
+// meetscript.io chỉ nhận tối đa 1000 dòng (lead) cho 1 lần chạy — vượt quá phải tách thành nhiều
+// file nhỏ, chạy lần lượt từng file.
+const MAX_ROWS_PER_RUN = 1000;
+
+export interface RiskyChunkResult {
   excelPath: string;
   teamResultScreenshot: string;
   googleResultScreenshot: string;
 }
 
+export interface RiskyFlowResult {
+  chunks: RiskyChunkResult[];
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
 /**
- * Xử lý 1 file Risky: đổi sang Excel, bắt cURL Teams + Gmail, rồi upload lần lượt lên 2 tab
- * TEAM/GOOGLE của meetscript.io. Trả về `null` nếu file Risky rỗng (không có lead nào) — không
- * cần tốn công bắt cURL/upload cho 1 danh sách trống.
+ * Xử lý 1 file Risky: đổi sang Excel (tự tách thành nhiều phần nếu vượt quá 1000 lead/phần —
+ * giới hạn của meetscript.io), bắt cURL Teams + Gmail 1 LẦN DUY NHẤT (phiên đăng nhập dùng chung
+ * được cho mọi phần đã tách), rồi upload lần lượt từng phần lên 2 tab TEAM/GOOGLE của
+ * meetscript.io. Trả về `null` nếu file Risky rỗng (không có lead nào).
  */
 export async function runRiskyFlow(riskyCsvPath: string): Promise<RiskyFlowResult | null> {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -33,28 +50,43 @@ export async function runRiskyFlow(riskyCsvPath: string): Promise<RiskyFlowResul
     return null;
   }
 
-  const excelPath = path.join(PROCESSED_DIR, `risky-${Date.now()}.xlsx`);
-  writeRiskyExcel(excelPath, emails);
-  logger.info(`Đã đổi file Risky sang Excel (chỉ cột email + 2 sheet trống): ${excelPath}`);
+  const emailChunks = chunkArray(emails, MAX_ROWS_PER_RUN);
+  const ts = Date.now();
+  if (emailChunks.length > 1) {
+    logger.info(
+      `File Risky có ${emails.length} lead, vượt giới hạn ${MAX_ROWS_PER_RUN}/lần của meetscript.io — ` +
+        `tự động tách thành ${emailChunks.length} file nhỏ để chạy lần lượt.`,
+    );
+  }
 
   const context = await openPersistentChrome();
   try {
+    // Bắt cURL Teams/Gmail CHỈ 1 LẦN rồi dùng chung cho mọi phần đã tách — phiên đăng nhập không
+    // phụ thuộc nội dung file Excel đính kèm, tách nhỏ bao nhiêu phần cũng chỉ cần bắt 1 lần.
     const teamsCurl = await fetchTeamsSearchCurl(context, DOWNLOAD_DIR);
-    // Lưu cURL ra file riêng (KHÔNG in thẳng ra log/chat — có chứa token đăng nhập thật) để tự
-    // kiểm tra đối chiếu với 1 cURL mẫu đã biết là hợp lệ, qua scp tải về máy, không qua bên nào khác.
-    const teamsCurlPath = path.join(PROCESSED_DIR, `teams-curl-${Date.now()}.txt`);
+    const teamsCurlPath = path.join(PROCESSED_DIR, `teams-curl-${ts}.txt`);
     fs.writeFileSync(teamsCurlPath, teamsCurl);
     logger.info(`Đã lưu cURL Teams để kiểm tra: ${teamsCurlPath}`);
-    const teamResultScreenshot = await uploadRiskyToMeetscript(context, teamsCurl, excelPath, DOWNLOAD_DIR, 'TEAM');
 
     const gmailCurl = await fetchGmailLookupCurl(context, DOWNLOAD_DIR);
-    const gmailCurlPath = path.join(PROCESSED_DIR, `gmail-curl-${Date.now()}.txt`);
+    const gmailCurlPath = path.join(PROCESSED_DIR, `gmail-curl-${ts}.txt`);
     fs.writeFileSync(gmailCurlPath, gmailCurl);
     logger.info(`Đã lưu cURL Gmail để kiểm tra: ${gmailCurlPath}`);
-    const googleResultScreenshot = await uploadRiskyToMeetscript(context, gmailCurl, excelPath, DOWNLOAD_DIR, 'GOOGLE');
+
+    const chunks: RiskyChunkResult[] = [];
+    for (const [index, chunkEmails] of emailChunks.entries()) {
+      const suffix = emailChunks.length > 1 ? `-part${index + 1}` : '';
+      const excelPath = path.join(PROCESSED_DIR, `risky-${ts}${suffix}.xlsx`);
+      writeRiskyExcel(excelPath, chunkEmails);
+      logger.info(`Đã đổi phần ${index + 1}/${emailChunks.length} (${chunkEmails.length} lead) sang Excel: ${excelPath}`);
+
+      const teamResultScreenshot = await uploadRiskyToMeetscript(context, teamsCurl, excelPath, DOWNLOAD_DIR, 'TEAM');
+      const googleResultScreenshot = await uploadRiskyToMeetscript(context, gmailCurl, excelPath, DOWNLOAD_DIR, 'GOOGLE');
+      chunks.push({ excelPath, teamResultScreenshot, googleResultScreenshot });
+    }
 
     logger.info('Hoàn tất xử lý file Risky.');
-    return { excelPath, teamResultScreenshot, googleResultScreenshot };
+    return { chunks };
   } finally {
     await context.close();
   }

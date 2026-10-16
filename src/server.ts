@@ -279,11 +279,19 @@ function renderJob(job: Job): string {
         ? `<p style="margin-top:16px">File Risky không có lead nào — không cần xử lý gì thêm.</p>`
         : result.riskyResult
           ? `<div style="margin-top:16px">
-              <p><strong>Đã xử lý xong Risky — kết quả thật (2 file Excel Team/Google) sẽ được bot Telegram gửi riêng.</strong></p>
-              <p>Ảnh xác nhận upload tab TEAM:</p>
-              <img src="/jobs/${job.id}/screenshot/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
-              <p style="margin-top:12px">Ảnh xác nhận upload tab GOOGLE:</p>
-              <img src="/jobs/${job.id}/screenshot/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+              <p><strong>Đã xử lý xong Risky${result.riskyResult.chunks.length > 1 ? ` (tách thành ${result.riskyResult.chunks.length} phần do vượt giới hạn 1000 lead/lần của meetscript.io)` : ''} — kết quả thật (file Excel Team/Google) sẽ được bot Telegram gửi riêng.</strong></p>
+              ${result.riskyResult.chunks
+                .map(
+                  (chunk, i) => `
+                <div style="margin-top:12px">
+                  ${result.riskyResult!.chunks.length > 1 ? `<p><strong>Phần ${i + 1}/${result.riskyResult!.chunks.length}</strong> (${escapeHtml(path.basename(chunk.excelPath))}):</p>` : ''}
+                  <p>Ảnh xác nhận upload tab TEAM:</p>
+                  <img src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+                  <p style="margin-top:12px">Ảnh xác nhận upload tab GOOGLE:</p>
+                  <img src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+                </div>`,
+                )
+                .join('')}
             </div>`
           : '';
     const riskyErrorBlock = result.riskyError
@@ -410,16 +418,16 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    const screenshotMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/screenshot\/(team|google)$/);
+    const screenshotMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/screenshot\/(\d+)\/(team|google)$/);
     if (req.method === 'GET' && screenshotMatch) {
       const job = jobs.get(screenshotMatch[1]);
-      if (!job?.result?.riskyResult) {
+      const chunk = job?.result?.riskyResult?.chunks[Number(screenshotMatch[2])];
+      if (!chunk) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy ảnh kết quả.');
         return;
       }
-      const filePath =
-        screenshotMatch[2] === 'team' ? job.result.riskyResult.teamResultScreenshot : job.result.riskyResult.googleResultScreenshot;
+      const filePath = screenshotMatch[3] === 'team' ? chunk.teamResultScreenshot : chunk.googleResultScreenshot;
       if (!fs.existsSync(filePath)) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy ảnh kết quả (có thể server đã khởi động lại).');
