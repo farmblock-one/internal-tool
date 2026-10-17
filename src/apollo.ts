@@ -62,6 +62,15 @@ async function clickButtonByTooltip(
     const text = ((await btn.textContent().catch(() => '')) ?? '').trim();
     if (text) continue; // chỉ quan tâm nút icon-only (không có chữ hiển thị)
 
+    // Bỏ qua hẳn nút đang bị khoá (vd "Power Dialer" của Apollo khi chưa đủ điều kiện dùng) —
+    // nút Export không bao giờ bị khoá sau khi đã chọn xong contact, nên 1 nút bị khoá chắc chắn
+    // không phải nút mình cần tìm. Quan trọng hơn: nếu lỡ match nhầm tooltip gần 1 nút bị khoá rồi
+    // cố bấm vào, Playwright sẽ treo tới hết timeout (element is not enabled) thay vì báo lỗi ngay
+    // — bỏ qua từ đầu tránh được cả nhầm lẫn lẫn treo lâu.
+    const ariaDisabled = await btn.getAttribute('aria-disabled').catch(() => null);
+    const isDisabled = await btn.isDisabled().catch(() => false);
+    if (ariaDisabled === 'true' || isDisabled) continue;
+
     await btn.hover().catch(() => {});
     await page.waitForTimeout(400);
 
@@ -84,8 +93,17 @@ async function clickButtonByTooltip(
     }
     await page.mouse.move(0, 0).catch(() => {}); // rời chuột để tooltip ẩn đi trước khi thử nút kế
     if (matchedNearby) {
-      await btn.click();
-      return true;
+      // Phòng khi lỡ match nhầm 1 nút tưởng bấm được nhưng thực ra không (vd vừa bị khoá lại ngay
+      // sau lúc kiểm tra ở trên) — giới hạn timeout ngắn (5s thay vì mặc định 30s) và bắt lỗi, thử
+      // tiếp nút tiếp theo thay vì để cả hàm treo/chết theo 1 lần đoán sai.
+      const clicked = await btn
+        .click({ timeout: 5000 })
+        .then(() => true)
+        .catch((err) => {
+          logger.warn(`Match tooltip nhưng bấm nút (index ${i}) thất bại, thử nút tiếp theo: ${err instanceof Error ? err.message : String(err)}`);
+          return false;
+        });
+      if (clicked) return true;
     }
   }
   return false;
