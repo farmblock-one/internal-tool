@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { mergeRiskyResultsIntoMaster, type MergeFileRef } from './risky-merge.js';
 
 const RESULTS_DIR = path.resolve('data/processed/telegram-results');
 const PENDING_FILE = path.resolve('data/processed/telegram-pending.json');
@@ -36,6 +37,15 @@ interface ReceivedEntry {
   receivedAt: number;
 }
 
+type MergeStatus = 'pending' | 'done' | 'error';
+
+interface JobMeta {
+  masterXlsxPath: string;
+  totalExpected: number;
+  mergeStatus: MergeStatus;
+  mergeError?: string;
+}
+
 export interface TelegramWatchStatus {
   pending: PendingEntry[];
   overdue: PendingEntry[];
@@ -44,6 +54,8 @@ export interface TelegramWatchStatus {
 export interface JobTelegramStatus {
   pendingCount: number;
   received: ReceivedEntry[];
+  mergeStatus?: MergeStatus;
+  mergeError?: string;
 }
 
 /** Dùng cho trang web UI — hiện số file đang chờ + danh sách file đã quá hạn cảnh báo. */
@@ -56,16 +68,31 @@ export function getTelegramWatchStatus(): TelegramWatchStatus {
  * được đã nhận bao nhiêu/kết quả nào rồi, còn bao nhiêu đang chờ, CHỈ TÍNH riêng cho job này.
  */
 export function getJobTelegramStatus(jobId: string): JobTelegramStatus {
+  const meta = jobMeta.get(jobId);
   return {
     pendingCount: pending.filter((e) => e.jobId === jobId).length,
     received: receivedByJob.get(jobId) ?? [],
+    mergeStatus: meta?.mergeStatus,
+    mergeError: meta?.mergeError,
   };
+}
+
+/**
+ * Gọi 1 LẦN DUY NHẤT ngay khi bắt đầu xử lý 1 job Risky (risky-pipeline.ts, trước khi upload) —
+ * cho biết job này cần đợi tổng cộng bao nhiêu kết quả (2 × số phần đã tách: Team + Google) và
+ * file Excel gốc nào cần cập nhật lại cột RESULT khi đã nhận đủ. Không gọi (jobId rỗng, vd chạy
+ * qua CLI `npm run risky`) thì vẫn tải kết quả về bình thường, chỉ là KHÔNG tự động ghép ngược lại
+ * file Excel gốc — team phải tự ghép tay.
+ */
+export function registerRiskyJobMeta(jobId: string, masterXlsxPath: string, totalExpected: number): void {
+  jobMeta.set(jobId, { masterXlsxPath, totalExpected, mergeStatus: 'pending' });
 }
 
 let pending: PendingEntry[] = [];
 // Chỉ lưu trong bộ nhớ (không cần ghi đĩa) — tương tự danh sách job trong server.ts, mất khi
 // restart server cũng không sao, vì bản thân job đó cũng không còn hiện trên web UI nữa.
 const receivedByJob = new Map<string, ReceivedEntry[]>();
+const jobMeta = new Map<string, JobMeta>();
 let updateOffset = 0;
 let started = false;
 
@@ -209,12 +236,35 @@ async function pollOnce(): Promise<void> {
         const list = receivedByJob.get(entry.jobId) ?? [];
         list.push({ kind: entry.kind, fileName: doc.file_name, receivedAt: Date.now() });
         receivedByJob.set(entry.jobId, list);
+        maybeMergeJob(entry.jobId);
       }
       pending.splice(matchIndex, 1);
       savePending();
     } catch (err) {
       logger.error(`Lỗi khi tải file Telegram "${doc.file_name}":`, err);
     }
+  }
+}
+
+/**
+ * Khi đã nhận ĐỦ số kết quả mong đợi (2 × số phần đã tách) cho 1 job — tự động ghép ngược lại
+ * vào file Excel gốc (xem `mergeRiskyResultsIntoMaster`). Chỉ chạy đúng 1 lần cho mỗi job
+ * (`mergeStatus` đổi từ 'pending' ngay khi bắt đầu chạy, dù thành công hay lỗi).
+ */
+function maybeMergeJob(jobId: string): void {
+  const meta = jobMeta.get(jobId);
+  if (!meta || meta.mergeStatus !== 'pending') return;
+  const received = receivedByJob.get(jobId) ?? [];
+  if (received.length < meta.totalExpected) return;
+
+  const resultFiles: MergeFileRef[] = received.map((r) => ({ kind: r.kind, filePath: path.join(RESULTS_DIR, r.fileName) }));
+  try {
+    mergeRiskyResultsIntoMaster(meta.masterXlsxPath, resultFiles);
+    meta.mergeStatus = 'done';
+  } catch (err) {
+    meta.mergeStatus = 'error';
+    meta.mergeError = err instanceof Error ? err.message : String(err);
+    logger.error(`Lỗi khi ghép kết quả Risky vào file Excel gốc (job ${jobId}):`, err);
   }
 }
 

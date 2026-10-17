@@ -6,7 +6,7 @@ import { writeRiskyExcel } from './xlsx-utils.js';
 import { fetchTeamsSearchCurl } from './teams.js';
 import { fetchGmailLookupCurl } from './gmail.js';
 import { uploadRiskyToMeetscript } from './meetscript.js';
-import { registerExpectedTelegramFile } from './telegram-watcher.js';
+import { registerExpectedTelegramFile, registerRiskyJobMeta } from './telegram-watcher.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
@@ -84,6 +84,10 @@ export async function runRiskyFlow(
   // phép trang trạng thái job đó hiện "đã nhận X/Y kết quả". Không có khi chạy qua CLI (process-
   // risky.ts) — vẫn hoạt động bình thường, chỉ là không hiện được tiến trình theo job cụ thể.
   jobId?: string,
+  // File Excel gốc (đã ghép đủ cột Apollo + Debounce, đặt tên theo yêu cầu) cần cập nhật lại cột
+  // RESULT ("Risky" -> "Safe to Send"/"Do not Send") khi đã nhận đủ kết quả thật Team/Google từ
+  // Telegram. Không có thì vẫn chạy, chỉ là không tự động ghép ngược — team phải tự ghép tay.
+  masterXlsxPath?: string,
 ): Promise<RiskyFlowResult | null> {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
   fs.mkdirSync(PROCESSED_DIR, { recursive: true });
@@ -135,6 +139,13 @@ export async function runRiskyFlow(
     { chunkIndex, kind: 'GOOGLE' as const },
   ]);
   const totalLots = uploadTasks.length;
+
+  // Đăng ký TRƯỚC khi upload (không phải sau) — để dù kết quả Telegram đầu tiên về nhanh tới mấy,
+  // `maybeMergeJob` trong telegram-watcher.ts luôn biết tổng số cần đợi + file Excel nào cần cập
+  // nhật, tránh race condition (nhận đủ kết quả trước khi biết tổng số cần đợi).
+  if (jobId && masterXlsxPath) {
+    registerRiskyJobMeta(jobId, masterXlsxPath, totalLots);
+  }
 
   const screenshots: Array<{ chunkIndex: number; kind: 'TEAM' | 'GOOGLE'; screenshotPath: string }> =
     await runWithConcurrency(

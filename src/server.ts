@@ -5,7 +5,7 @@ import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
 import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
 import { openPersistentChrome } from './browser.js';
-import { startTelegramWatcher, getTelegramWatchStatus, getJobTelegramStatus } from './telegram-watcher.js';
+import { startTelegramWatcher, getTelegramWatchStatus, getJobTelegramStatus } from './telegram-watcher.js'; // getJobTelegramStatus also carries mergeStatus/mergeError
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -37,6 +37,10 @@ interface RiskyJob {
   kind: 'risky';
   id: string;
   riskyPath: string;
+  // File Excel gốc (đã ghép đủ cột Apollo + Debounce) của job Apollo/Debounce sinh ra file Risky
+  // này — khi nhận đủ kết quả thật Team/Google từ Telegram, tự động cập nhật lại cột RESULT ngay
+  // trong file này (xem registerRiskyJobMeta/mergeRiskyResultsIntoMaster).
+  masterXlsxPath: string;
   // Tên file output của job Apollo/Debounce sinh ra file Risky này — chỉ để hiển thị cho dễ nhận biết.
   sourceLabel: string;
   status: JobStatus;
@@ -77,9 +81,18 @@ function enqueueMainJob(listUrl: string, outputFileName: string): MainJob {
   return job;
 }
 
-function enqueueRiskyJob(riskyPath: string, sourceLabel: string): RiskyJob {
+function enqueueRiskyJob(riskyPath: string, masterXlsxPath: string, sourceLabel: string): RiskyJob {
   const id = crypto.randomBytes(6).toString('hex');
-  const job: RiskyJob = { kind: 'risky', id, riskyPath, sourceLabel, status: 'queued', logs: [], createdAt: Date.now() };
+  const job: RiskyJob = {
+    kind: 'risky',
+    id,
+    riskyPath,
+    masterXlsxPath,
+    sourceLabel,
+    status: 'queued',
+    logs: [],
+    createdAt: Date.now(),
+  };
   jobs.set(id, job);
   riskyQueue.push(id);
   void processRiskyQueue();
@@ -104,7 +117,7 @@ async function processMainQueue(): Promise<void> {
           // Tự động đẩy tiếp bước xử lý Risky (Teams/Gmail -> meetscript.io) vào hàng đợi RIÊNG —
           // vẫn là 1 luồng liền mạch, không cần bấm nút nào thêm, nhưng không còn chặn job
           // Apollo/Debounce tiếp theo của người khác nữa.
-          const riskyJob = enqueueRiskyJob(job.result.riskyPath, job.outputFileName || job.id);
+          const riskyJob = enqueueRiskyJob(job.result.riskyPath, job.result.masterXlsxPath, job.outputFileName || job.id);
           job.riskyJobId = riskyJob.id;
         } catch (err) {
           job.status = 'error';
@@ -143,6 +156,7 @@ async function processRiskyQueue(): Promise<void> {
               job.progress = `${done}/${total}`;
             },
             job.id,
+            job.masterXlsxPath,
           );
           job.status = 'done';
         } catch (err) {
@@ -408,12 +422,19 @@ function renderMainJob(job: MainJob): string {
     if (job.riskyJobId) {
       const riskyJob = jobs.get(job.riskyJobId);
       if (riskyJob && isRiskyJob(riskyJob)) {
+        const mergeStatus = getJobTelegramStatus(riskyJob.id).mergeStatus;
+        const mergeNote =
+          mergeStatus === 'done'
+            ? ' — <span style="color:#1a9d6c">✅ đã tự động cập nhật cột RESULT trong file Excel ở trên</span>'
+            : mergeStatus === 'error'
+              ? ' — <span style="color:#d33a3a">⚠️ lỗi khi tự động cập nhật, xem chi tiết ở trang Risky</span>'
+              : '';
         riskyLinkBlock = `
           <p style="margin-top:16px">
             Bước xử lý Risky (Teams/Gmail &rarr; meetscript.io):
             <a href="/jobs/${riskyJob.id}">xem tiến trình</a> —
             <span class="status status-${riskyJob.status}">${riskyJob.status}</span>
-            ${riskyJob.status === 'running' && riskyJob.progress ? ` (${escapeHtml(riskyJob.progress)})` : ''}
+            ${riskyJob.status === 'running' && riskyJob.progress ? ` (${escapeHtml(riskyJob.progress)})` : ''}${mergeNote}
           </p>`;
       }
     }
@@ -500,6 +521,11 @@ function renderRiskyJob(job: RiskyJob): string {
             `<li>${escapeHtml(r.fileName)} (${r.kind}) — lúc ${new Date(r.receivedAt).toLocaleString('vi-VN')}</li>`,
         )
         .join('')}</ul>`;
+    }
+    if (telegramStatus.mergeStatus === 'done') {
+      telegramBlock += `<p style="margin-top:10px;color:#1a9d6c"><strong>✅ Đã tự động cập nhật cột RESULT (Safe to Send/Do not Send) ngay trong file Excel gốc</strong> — tải lại file ở trên để xem bản mới nhất.</p>`;
+    } else if (telegramStatus.mergeStatus === 'error') {
+      telegramBlock += `<div class="nsc-error" style="margin-top:10px"><strong>Lỗi khi tự động cập nhật file Excel gốc:</strong> ${escapeHtml(telegramStatus.mergeError ?? '')}<br/>(Cần tự ghép tay — các file kết quả Team/Google vẫn tải về bình thường, chỉ bước ghép tự động bị lỗi.)</div>`;
     }
   }
 

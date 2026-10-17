@@ -18,7 +18,7 @@ export function writeCsv(filePath: string, rows: Row[]): void {
 }
 
 /** Tìm tên cột thực tế (không phân biệt hoa/thường) khớp với 1 trong các alias cho trước. */
-function findColumn(rows: Row[], aliases: string[]): string {
+export function findColumn(rows: Row[], aliases: string[]): string {
   if (rows.length === 0) throw new Error('CSV rỗng, không xác định được cột.');
   const columns = Object.keys(rows[0]);
   const found = columns.find((c) => aliases.some((a) => a.toLowerCase() === c.toLowerCase()));
