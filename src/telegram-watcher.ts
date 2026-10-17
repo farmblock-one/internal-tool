@@ -228,7 +228,16 @@ async function pollOnce(): Promise<void> {
     const message = update.message;
     const doc = message?.document;
     const chatId = message?.chat.id;
-    if (!doc?.file_name || String(chatId) !== config.telegramChatId) continue;
+    if (!doc?.file_name) continue; // không phải tin nhắn có đính kèm file — bỏ qua, không cần log
+
+    // ⚠️ Mọi điều kiện dưới đây trước kia bỏ qua ÂM THẦM (continue, không log) — khó biết lý do
+    // thật khi 1 file đáng lẽ khớp mà không được bắt. Giờ log rõ lý do bị bỏ qua ở MỌI trường hợp.
+    if (String(chatId) !== config.telegramChatId) {
+      logger.info(
+        `Bỏ qua file "${doc.file_name}" — đến từ chat ID ${chatId}, khác TELEGRAM_CHAT_ID đang cấu hình (${config.telegramChatId}).`,
+      );
+      continue;
+    }
 
     // Group có nhiều người, nhiều tin nhắn — PHẢI kiểm tra đúng người gửi là bot meetscript.io,
     // không chỉ dựa vào tên file khớp (ai gửi đúng tên file trùng ngẫu nhiên cũng sẽ bị nhận nhầm
@@ -237,12 +246,21 @@ async function pollOnce(): Promise<void> {
     if (config.telegramResultBotUsername) {
       const senderUsername = message?.from?.username;
       if (!senderUsername || normalizeUsername(senderUsername) !== normalizeUsername(config.telegramResultBotUsername)) {
+        logger.info(
+          `Bỏ qua file "${doc.file_name}" — người gửi @${senderUsername ?? '(không có username)'}, khác TELEGRAM_RESULT_BOT_USERNAME đang cấu hình (@${normalizeUsername(config.telegramResultBotUsername)}).`,
+        );
         continue;
       }
     }
 
     const matchIndex = pending.findIndex((entry) => matchesEntry(doc.file_name!, entry));
-    if (matchIndex === -1) continue;
+    if (matchIndex === -1) {
+      logger.info(
+        `File "${doc.file_name}" đúng group/đúng người gửi nhưng KHÔNG khớp tên với bất kỳ mục nào đang chờ ` +
+          `(hiện có ${pending.length} mục chờ: ${pending.map((e) => `${path.basename(e.excelPath)}[${e.kind}]`).join(', ') || '(trống)'}).`,
+      );
+      continue;
+    }
 
     const entry = pending[matchIndex];
     try {
