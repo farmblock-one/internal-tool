@@ -270,7 +270,7 @@ async function pollOnce(): Promise<void> {
         const list = receivedByJob.get(entry.jobId) ?? [];
         list.push({ kind: entry.kind, fileName: doc.file_name, receivedAt: Date.now() });
         receivedByJob.set(entry.jobId, list);
-        maybeMergeJob(entry.jobId);
+        await maybeMergeJob(entry.jobId);
       }
       pending.splice(matchIndex, 1);
       savePending();
@@ -285,7 +285,25 @@ async function pollOnce(): Promise<void> {
  * vào file Excel gốc (xem `mergeRiskyResultsIntoMaster`). Chỉ chạy đúng 1 lần cho mỗi job
  * (`mergeStatus` đổi từ 'pending' ngay khi bắt đầu chạy, dù thành công hay lỗi).
  */
-function maybeMergeJob(jobId: string): void {
+/**
+ * Gửi 1 file lên ĐÚNG group Telegram đang theo dõi (cùng chat, cùng bot token dùng để nghe tin
+ * nhắn) — dùng sendDocument của Telegram Bot API. Bot cần đã có sẵn trong group đó (chính là bot
+ * đang dùng để nghe kết quả meetscript.io) và có quyền gửi tin nhắn/file bình thường trong group.
+ */
+async function sendDocumentToTelegram(filePath: string, caption: string): Promise<void> {
+  const token = config.telegramBotToken;
+  const form = new FormData();
+  form.append('chat_id', config.telegramChatId);
+  form.append('caption', caption);
+  form.append('document', new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: form });
+  const data = (await res.json()) as { ok: boolean; description?: string };
+  if (!data.ok) {
+    throw new Error(`Telegram sendDocument thất bại: ${JSON.stringify(data)}`);
+  }
+}
+
+async function maybeMergeJob(jobId: string): Promise<void> {
   const meta = jobMeta.get(jobId);
   if (!meta || meta.mergeStatus !== 'pending') return;
   const received = receivedByJob.get(jobId) ?? [];
@@ -293,8 +311,22 @@ function maybeMergeJob(jobId: string): void {
 
   const resultFiles: MergeFileRef[] = received.map((r) => ({ kind: r.kind, filePath: path.join(RESULTS_DIR, r.fileName) }));
   try {
-    mergeRiskyResultsIntoMaster(meta.masterXlsxPath, resultFiles);
+    const stats = mergeRiskyResultsIntoMaster(meta.masterXlsxPath, resultFiles);
     meta.mergeStatus = 'done';
+
+    // Gửi luôn file Excel gốc ĐÃ CẬP NHẬT ngược lại group Telegram — team không cần tự vào web UI
+    // tìm/tải, kết quả cuối cùng xuất hiện ngay tại nơi team vẫn theo dõi kết quả meetscript.io.
+    try {
+      await sendDocumentToTelegram(
+        meta.masterXlsxPath,
+        `✅ Đã cập nhật kết quả Risky: ${stats.updatedCount} lead (Safe to Send/Do not Send)` +
+          (stats.noMatchCount > 0 ? `, ${stats.noMatchCount} lead chưa khớp được kết quả (vẫn giữ "Risky", cần kiểm tra tay)` : '') +
+          '.',
+      );
+      logger.info(`Đã gửi file Excel gốc (đã cập nhật) vào group Telegram: ${meta.masterXlsxPath}`);
+    } catch (sendErr) {
+      logger.error(`Ghép file thành công nhưng gửi lại vào Telegram thất bại (tải tay từ web UI thay thế):`, sendErr);
+    }
   } catch (err) {
     meta.mergeStatus = 'error';
     meta.mergeError = err instanceof Error ? err.message : String(err);

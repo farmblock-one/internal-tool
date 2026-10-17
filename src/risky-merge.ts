@@ -9,6 +9,11 @@ export interface MergeFileRef {
   filePath: string;
 }
 
+export interface MergeStats {
+  updatedCount: number;
+  noMatchCount: number;
+}
+
 /**
  * Sau khi đã nhận ĐỦ kết quả thật (cả Team lẫn Google, đủ mọi phần đã tách) từ meetscript.io qua
  * Telegram cho 1 job Risky — cập nhật lại cột RESULT trong file Excel GỐC (file team đã đặt tên
@@ -18,7 +23,7 @@ export interface MergeFileRef {
  *   - Chỉ áp dụng cho row đang có RESULT = "Risky" — không đụng tới các row Safe to Send/Invalid
  *     sẵn có (những row đó chưa từng được upload lên meetscript.io, không có kết quả gì để ghép).
  */
-export function mergeRiskyResultsIntoMaster(masterXlsxPath: string, resultFiles: MergeFileRef[]): void {
+export function mergeRiskyResultsIntoMaster(masterXlsxPath: string, resultFiles: MergeFileRef[]): MergeStats {
   const teamResults = new Map<string, boolean>();
   const googleResults = new Map<string, boolean>();
   for (const file of resultFiles) {
@@ -36,7 +41,7 @@ export function mergeRiskyResultsIntoMaster(masterXlsxPath: string, resultFiles:
   const masterRows = readXlsxRows(masterXlsxPath, MASTER_SHEET_NAME);
   if (masterRows.length === 0) {
     logger.warn(`File Excel gốc "${masterXlsxPath}" rỗng — bỏ qua bước cập nhật kết quả Risky.`);
-    return;
+    return { updatedCount: 0, noMatchCount: 0 };
   }
   const emailCol = findColumn(masterRows, ['email']);
   const resultCol = findColumn(masterRows, ['result']);
@@ -63,4 +68,5 @@ export function mergeRiskyResultsIntoMaster(masterXlsxPath: string, resultFiles:
       `dựa theo kết quả thật Team/Google từ Telegram: ${masterXlsxPath}` +
       (noMatchCount > 0 ? ` (${noMatchCount} lead Risky không khớp được với file kết quả nào, vẫn giữ "Risky", cần kiểm tra tay).` : '.'),
   );
+  return { updatedCount, noMatchCount };
 }
