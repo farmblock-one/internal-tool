@@ -44,4 +44,9 @@ export const config = {
   // gửi, không chỉ dựa vào tên file khớp (group có nhiều người, cần tránh nhận nhầm file của ai
   // đó gửi trùng tên). Để trống vẫn chạy được nhưng KHÔNG an toàn — xem cảnh báo lúc khởi động.
   telegramResultBotUsername: process.env.TELEGRAM_RESULT_BOT_USERNAME ?? '',
+  // Sau chừng này phút chưa thấy bot meetscript.io trả kết quả qua Telegram cho 1 file, CHỈ cảnh
+  // báo (hiện lên web UI) — KHÔNG bỏ theo dõi file đó, vẫn tự động lưu nếu bot trả về trễ hơn.
+  // Mặc định 90 phút theo mức tối đa đã xác nhận thực tế cho 1 file; có thể tăng nếu xử lý nhiều
+  // file song song khiến backend meetscript.io trả kết quả chậm hơn bình thường.
+  telegramResultWarnAfterMinutes: Number(process.env.TELEGRAM_RESULT_WARN_AFTER_MINUTES ?? '90'),
 };

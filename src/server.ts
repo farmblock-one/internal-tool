@@ -5,7 +5,7 @@ import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
 import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
 import { openPersistentChrome } from './browser.js';
-import { startTelegramWatcher } from './telegram-watcher.js';
+import { startTelegramWatcher, getTelegramWatchStatus } from './telegram-watcher.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -295,6 +295,30 @@ function jobLabel(job: Job): string {
   return job.kind === 'main' ? job.outputFileName || job.id : `Risky — ${job.sourceLabel}`;
 }
 
+function renderTelegramBanner(): string {
+  const status = getTelegramWatchStatus();
+  if (status.pending.length === 0) return '';
+
+  const overdueBlock =
+    status.overdue.length > 0
+      ? `<p style="margin-top:10px;color:#a85b00"><strong>⚠️ ${status.overdue.length} file chờ quá lâu chưa thấy bot trả về</strong> (vẫn tiếp tục tự động chờ, nhưng nếu lâu quá nên vào group Telegram kiểm tra thủ công):</p>
+         <ul>
+           ${status.overdue
+             .map(
+               (e) =>
+                 `<li>${escapeHtml(path.basename(e.excelPath))} (${e.kind}) — đã chờ ${Math.round((Date.now() - e.registeredAt) / 60_000)} phút</li>`,
+             )
+             .join('')}
+         </ul>`
+      : '';
+
+  return `<div class="nsc-banner" style="background:#eef6fb;border-color:var(--nsc-light)">
+      <strong>📨 Đang chờ bot meetscript.io trả kết quả qua Telegram cho ${status.pending.length} file.</strong>
+      <p>Tự động tải về ngay khi bot gửi vào group — không cần làm gì thêm, chỉ cần chờ.</p>
+      ${overdueBlock}
+    </div>`;
+}
+
 function renderHome(errorMessage?: string): string {
   const allJobs = [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
   // "running" tối đa 1 job/hàng đợi (mỗi hàng đợi chạy tuần tự), nhưng "queued" có thể nhiều người
@@ -335,10 +359,13 @@ function renderHome(errorMessage?: string): string {
     )
     .join('');
 
+  const telegramBanner = renderTelegramBanner();
+  const refreshSeconds = activeJobs.length > 0 ? 5 : telegramBanner ? 15 : 0;
   const body = `
-${activeJobs.length > 0 ? '<meta http-equiv="refresh" content="5" />' : ''}
+${refreshSeconds > 0 ? `<meta http-equiv="refresh" content="${refreshSeconds}" />` : ''}
 ${errorBanner}
 ${banner}
+${telegramBanner}
 <div class="nsc-card">
   <form method="POST" action="/jobs">
     <label for="listUrl">Link List Apollo</label>

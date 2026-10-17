@@ -5,8 +5,11 @@ import { logger } from './logger.js';
 
 const RESULTS_DIR = path.resolve('data/processed/telegram-results');
 const PENDING_FILE = path.resolve('data/processed/telegram-pending.json');
-// Theo xác nhận thực tế: bot meetscript.io có thể mất tới 1h30 mới trả kết quả qua Telegram.
-const MAX_WAIT_MS = 90 * 60_000;
+// Sau ngần ấy thời gian hoàn toàn không thấy phản hồi (kể cả sau khi đã cảnh báo quá hạn ở trên),
+// coi như chắc chắn không còn tới nữa (vd job upload lỗi, bot không bao giờ trả lời) — bỏ hẳn,
+// không theo dõi mãi mãi gây phình to file pending.json vô thời hạn. Cố tình đặt rất rộng rãi
+// (24 tiếng) vì việc tiếp tục theo dõi không tốn chi phí gì (chỉ so khớp tên file mỗi lần poll).
+const HARD_DROP_MS = 24 * 60 * 60_000;
 // Long-poll Telegram getUpdates — nó tự giữ request mở tới khi có tin nhắn mới hoặc hết 30s,
 // không cần tự ý chờ/sleep thêm giữa các lần gọi.
 const POLL_TIMEOUT_SECONDS = 30;
@@ -17,6 +20,20 @@ interface PendingEntry {
   excelPath: string;
   kind: ResultKind;
   registeredAt: number;
+  // Có giá trị khi đã cảnh báo quá hạn chờ (xem `config.telegramResultWarnAfterMinutes`) — CHƯA bỏ
+  // theo dõi, vẫn tự động lưu nếu bot trả kết quả muộn hơn dự kiến, chỉ để hiển thị cảnh báo lên
+  // web UI (xem `getTelegramWatchStatus`) và tránh log lặp lại cảnh báo mỗi lần poll (~30s/lần).
+  warnedAt?: number;
+}
+
+export interface TelegramWatchStatus {
+  pending: PendingEntry[];
+  overdue: PendingEntry[];
+}
+
+/** Dùng cho trang web UI — hiện số file đang chờ + danh sách file đã quá hạn cảnh báo. */
+export function getTelegramWatchStatus(): TelegramWatchStatus {
+  return { pending, overdue: pending.filter((entry) => entry.warnedAt !== undefined) };
 }
 
 let pending: PendingEntry[] = [];
@@ -139,17 +156,37 @@ async function pollOnce(): Promise<void> {
 
 function checkTimeouts(): void {
   const now = Date.now();
+  const warnAfterMs = config.telegramResultWarnAfterMinutes * 60_000;
+  let changed = false;
+
   const stillPending = pending.filter((entry) => {
-    const timedOut = now - entry.registeredAt > MAX_WAIT_MS;
-    if (timedOut) {
-      logger.warn(
-        `Chờ quá ${Math.round(MAX_WAIT_MS / 60_000)} phút mà chưa thấy kết quả ${entry.kind} cho ` +
-          `${path.basename(entry.excelPath)} từ Telegram — bỏ qua, cần kiểm tra lại tay.`,
+    if (now - entry.registeredAt > HARD_DROP_MS) {
+      // Chờ quá lâu (24 tiếng) mà vẫn không có phản hồi — gần như chắc chắn sẽ không bao giờ tới
+      // nữa (vd job upload bị lỗi phía meetscript.io). Bỏ hẳn, không theo dõi tiếp.
+      logger.error(
+        `Chờ quá ${Math.round(HARD_DROP_MS / 3_600_000)} tiếng mà KHÔNG thấy kết quả ${entry.kind} cho ` +
+          `${path.basename(entry.excelPath)} từ Telegram — BỎ HẲN, không theo dõi tiếp. Cần kiểm tra lại tay ` +
+          `(có thể job upload bị lỗi, hoặc file đã được bot gửi nhưng sai tên không khớp được).`,
       );
+      changed = true;
+      return false;
     }
-    return !timedOut;
+    if (entry.warnedAt === undefined && now - entry.registeredAt > warnAfterMs) {
+      // CHỈ cảnh báo, KHÔNG bỏ theo dõi — nếu bot trả kết quả muộn hơn dự kiến (vd xử lý nhiều
+      // file song song khiến backend meetscript.io chậm hơn bình thường), vẫn tự động nhận được
+      // bình thường. Đánh dấu `warnedAt` để không lặp lại cảnh báo này mỗi lần poll (~30s/lần).
+      logger.warn(
+        `Chờ quá ${config.telegramResultWarnAfterMinutes} phút mà chưa thấy kết quả ${entry.kind} cho ` +
+          `${path.basename(entry.excelPath)} từ Telegram — VẪN TIẾP TỤC chờ (xem cảnh báo trên web UI), ` +
+          `chưa bỏ theo dõi.`,
+      );
+      entry.warnedAt = now;
+      changed = true;
+    }
+    return true;
   });
-  if (stillPending.length !== pending.length) {
+
+  if (changed) {
     pending = stillPending;
     savePending();
   }
