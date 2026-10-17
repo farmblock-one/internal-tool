@@ -11,9 +11,16 @@ const PENDING_FILE = path.resolve('data/processed/telegram-pending.json');
 // không theo dõi mãi mãi gây phình to file pending.json vô thời hạn. Cố tình đặt rất rộng rãi
 // (24 tiếng) vì việc tiếp tục theo dõi không tốn chi phí gì (chỉ so khớp tên file mỗi lần poll).
 const HARD_DROP_MS = 24 * 60 * 60_000;
-// Long-poll Telegram getUpdates — nó tự giữ request mở tới khi có tin nhắn mới hoặc hết 30s,
-// không cần tự ý chờ/sleep thêm giữa các lần gọi.
-const POLL_TIMEOUT_SECONDS = 30;
+// Long-poll Telegram getUpdates — nó tự giữ request mở tới khi có tin nhắn mới hoặc hết ngần ấy
+// giây, không cần tự ý chờ/sleep thêm giữa các lần gọi.
+//
+// ⚠️ Đã xác nhận thực tế trên VM: giữ kết nối mở 30s (giá trị gốc) khiến request LUÔN LUÔN thất
+// bại (fetch failed) — có 1 thiết bị mạng trung gian (phía nhà cung cấp VM/ISP) tự cắt kết nối
+// "rảnh" (không có dữ liệu qua lại) sau một khoảng NGẮN HƠN 30s. Gọi NHANH (vd getMe) luôn thành
+// công bình thường — chỉ request giữ kết nối mở lâu mới bị cắt. Giảm xuống 10s để tránh bị cắt
+// giữa chừng; đổi lại phải gọi getUpdates thường xuyên hơn (chấp nhận được, Telegram không giới
+// hạn gắt số lần gọi).
+const POLL_TIMEOUT_SECONDS = 10;
 
 type ResultKind = 'TEAM' | 'GOOGLE';
 
