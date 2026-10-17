@@ -57,6 +57,36 @@ function savePending(): void {
 }
 
 /**
+ * Đọc lại file sổ chờ từ đĩa, gộp thêm các mục MỚI chưa có trong bộ nhớ — cần thiết vì
+ * `registerExpectedTelegramFile` có thể được gọi từ 1 TIẾN TRÌNH NODE KHÁC hoàn toàn với tiến
+ * trình đang chạy vòng lặp theo dõi này (vd chạy tay `npm run risky` trong lúc `npm run web` đã
+ * đang chạy sẵn) — 2 tiến trình không chia sẻ bộ nhớ, chỉ chia sẻ được qua file trên đĩa. Gọi định
+ * kỳ (mỗi vòng lặp poll, ~30s/lần) để không bỏ lỡ các mục được ghi từ tiến trình khác.
+ */
+function mergePendingFromDisk(): void {
+  try {
+    if (!fs.existsSync(PENDING_FILE)) return;
+    const onDisk = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf-8')) as PendingEntry[];
+    const existingKeys = new Set(pending.map((e) => `${e.excelPath}|${e.kind}`));
+    let addedAny = false;
+    for (const entry of onDisk) {
+      const key = `${entry.excelPath}|${entry.kind}`;
+      if (!existingKeys.has(key)) {
+        pending.push(entry);
+        existingKeys.add(key);
+        addedAny = true;
+        logger.info(
+          `Phát hiện mục chờ Telegram mới (ghi từ tiến trình khác): đợi kết quả ${entry.kind} cho ${path.basename(entry.excelPath)}.`,
+        );
+      }
+    }
+    if (addedAny) savePending();
+  } catch (err) {
+    logger.warn('Không đọc lại được sổ chờ Telegram từ đĩa (bỏ qua, giữ nguyên danh sách hiện có):', err);
+  }
+}
+
+/**
  * Gọi ngay sau khi upload lên meetscript.io thành công (tab TEAM hoặc GOOGLE) — ghi vào "sổ chờ"
  * (lưu trên đĩa, sống sót qua restart) để bộ phận theo dõi Telegram (chạy nền, độc lập hoàn toàn
  * với hàng đợi Chrome) biết cần đợi đúng file kết quả nào.
@@ -217,6 +247,7 @@ export function startTelegramWatcher(): void {
 
   void (async () => {
     for (;;) {
+      mergePendingFromDisk();
       try {
         await pollOnce();
       } catch (err) {
