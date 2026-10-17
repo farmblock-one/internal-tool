@@ -21,16 +21,10 @@ const PENDING_FILE = path.resolve('data/processed/telegram-pending.json');
 // không theo dõi mãi mãi gây phình to file pending.json vô thời hạn. Cố tình đặt rất rộng rãi
 // (24 tiếng) vì việc tiếp tục theo dõi không tốn chi phí gì (chỉ so khớp tên file mỗi lần poll).
 const HARD_DROP_MS = 24 * 60 * 60_000;
-// Long-poll Telegram getUpdates — nó tự giữ request mở tới khi có tin nhắn mới hoặc hết ngần ấy
-// giây, không cần tự ý chờ/sleep thêm giữa các lần gọi.
-//
-// ⚠️ Đã xác nhận thực tế trên VM: giữ kết nối mở 30s (giá trị gốc) khiến request LUÔN LUÔN thất
-// bại (fetch failed) — có 1 thiết bị mạng trung gian (phía nhà cung cấp VM/ISP) tự cắt kết nối
-// "rảnh" (không có dữ liệu qua lại) sau một khoảng NGẮN HƠN 30s. Gọi NHANH (vd getMe) luôn thành
-// công bình thường — chỉ request giữ kết nối mở lâu mới bị cắt. Giảm xuống 10s để tránh bị cắt
-// giữa chừng; đổi lại phải gọi getUpdates thường xuyên hơn (chấp nhận được, Telegram không giới
-// hạn gắt số lần gọi).
-const POLL_TIMEOUT_SECONDS = 10;
+// Đọc lại sổ chờ từ đĩa + kiểm tra quá hạn định kỳ — KHÔNG liên quan gì tới mạng (chỉ đọc file
+// local), dùng setInterval đơn giản thay vì gắn vào vòng lặp poll Telegram cũ (đã bỏ, xem phần
+// webhook bên dưới).
+const LOCAL_MAINTENANCE_INTERVAL_MS = 60_000;
 
 type ResultKind = 'TEAM' | 'GOOGLE';
 
@@ -110,7 +104,6 @@ let pending: PendingEntry[] = [];
 // restart server cũng không sao, vì bản thân job đó cũng không còn hiện trên web UI nữa.
 const receivedByJob = new Map<string, ReceivedEntry[]>();
 const jobMeta = new Map<string, JobMeta>();
-let updateOffset = 0;
 let started = false;
 
 function loadPending(): void {
@@ -241,73 +234,110 @@ function normalizeUsername(username: string): string {
   return username.replace(/^@/, '').toLowerCase();
 }
 
-async function pollOnce(): Promise<void> {
-  const token = config.telegramBotToken;
-  const url = `https://api.telegram.org/bot${token}/getUpdates?timeout=${POLL_TIMEOUT_SECONDS}&offset=${updateOffset}`;
-  // Telegram giữ kết nối mở tới ${POLL_TIMEOUT_SECONDS}s (long-poll) — timeout phía mình phải DÀI
-  // HƠN mức đó 1 khoảng đủ rộng, không thì tự cắt kết nối trước khi Telegram kịp trả lời bình thường.
-  const res = await fetchWithTimeout(url, (POLL_TIMEOUT_SECONDS + 15) * 1000);
-  const data = (await res.json()) as { ok: boolean; result?: TelegramUpdate[]; description?: string };
-  if (!data.ok || !data.result) {
-    logger.warn('Telegram getUpdates trả về lỗi:', JSON.stringify(data));
+/**
+ * Xử lý ĐÚNG 1 update Telegram — dùng bởi route webhook (server.ts) mỗi khi Telegram gửi tin nhắn
+ * mới tới. Trước đây hàm này nằm trong vòng lặp của `pollOnce` (tự hỏi Telegram liên tục); giờ
+ * webhook đẩy từng update một, không cần vòng lặp/offset gì nữa.
+ */
+export async function processIncomingUpdate(update: TelegramUpdate): Promise<void> {
+  const message = update.message;
+  const doc = message?.document;
+  const chatId = message?.chat.id;
+  if (!doc?.file_name) return; // không phải tin nhắn có đính kèm file — bỏ qua, không cần log
+
+  // ⚠️ Mọi điều kiện dưới đây trước kia bỏ qua ÂM THẦM — khó biết lý do thật khi 1 file đáng lẽ
+  // khớp mà không được bắt. Giờ log rõ lý do bị bỏ qua ở MỌI trường hợp.
+  if (String(chatId) !== config.telegramChatId) {
+    logger.info(
+      `Bỏ qua file "${doc.file_name}" — đến từ chat ID ${chatId}, khác TELEGRAM_CHAT_ID đang cấu hình (${config.telegramChatId}).`,
+    );
     return;
   }
 
-  for (const update of data.result) {
-    updateOffset = update.update_id + 1;
-    const message = update.message;
-    const doc = message?.document;
-    const chatId = message?.chat.id;
-    if (!doc?.file_name) continue; // không phải tin nhắn có đính kèm file — bỏ qua, không cần log
-
-    // ⚠️ Mọi điều kiện dưới đây trước kia bỏ qua ÂM THẦM (continue, không log) — khó biết lý do
-    // thật khi 1 file đáng lẽ khớp mà không được bắt. Giờ log rõ lý do bị bỏ qua ở MỌI trường hợp.
-    if (String(chatId) !== config.telegramChatId) {
+  // Group có nhiều người, nhiều tin nhắn — PHẢI kiểm tra đúng người gửi là bot meetscript.io,
+  // không chỉ dựa vào tên file khớp (ai gửi đúng tên file trùng ngẫu nhiên cũng sẽ bị nhận nhầm
+  // nếu không kiểm tra người gửi). Nếu chưa cấu hình username thì vẫn chạy nhưng không an toàn —
+  // đã cảnh báo rõ lúc khởi động.
+  if (config.telegramResultBotUsername) {
+    const senderUsername = message?.from?.username;
+    if (!senderUsername || normalizeUsername(senderUsername) !== normalizeUsername(config.telegramResultBotUsername)) {
       logger.info(
-        `Bỏ qua file "${doc.file_name}" — đến từ chat ID ${chatId}, khác TELEGRAM_CHAT_ID đang cấu hình (${config.telegramChatId}).`,
+        `Bỏ qua file "${doc.file_name}" — người gửi @${senderUsername ?? '(không có username)'}, khác TELEGRAM_RESULT_BOT_USERNAME đang cấu hình (@${normalizeUsername(config.telegramResultBotUsername)}).`,
       );
-      continue;
-    }
-
-    // Group có nhiều người, nhiều tin nhắn — PHẢI kiểm tra đúng người gửi là bot meetscript.io,
-    // không chỉ dựa vào tên file khớp (ai gửi đúng tên file trùng ngẫu nhiên cũng sẽ bị nhận nhầm
-    // nếu không kiểm tra người gửi). Nếu chưa cấu hình username thì vẫn chạy nhưng không an toàn —
-    // đã cảnh báo rõ lúc khởi động.
-    if (config.telegramResultBotUsername) {
-      const senderUsername = message?.from?.username;
-      if (!senderUsername || normalizeUsername(senderUsername) !== normalizeUsername(config.telegramResultBotUsername)) {
-        logger.info(
-          `Bỏ qua file "${doc.file_name}" — người gửi @${senderUsername ?? '(không có username)'}, khác TELEGRAM_RESULT_BOT_USERNAME đang cấu hình (@${normalizeUsername(config.telegramResultBotUsername)}).`,
-        );
-        continue;
-      }
-    }
-
-    const matchIndex = pending.findIndex((entry) => matchesEntry(doc.file_name!, entry));
-    if (matchIndex === -1) {
-      logger.info(
-        `File "${doc.file_name}" đúng group/đúng người gửi nhưng KHÔNG khớp tên với bất kỳ mục nào đang chờ ` +
-          `(hiện có ${pending.length} mục chờ: ${pending.map((e) => `${path.basename(e.excelPath)}[${e.kind}]`).join(', ') || '(trống)'}).`,
-      );
-      continue;
-    }
-
-    const entry = pending[matchIndex];
-    try {
-      await downloadTelegramFile(doc.file_id, doc.file_name);
-      logger.info(`Đã nhận + tải kết quả Telegram (${entry.kind}) cho ${path.basename(entry.excelPath)}: ${doc.file_name}`);
-      if (entry.jobId) {
-        const list = receivedByJob.get(entry.jobId) ?? [];
-        list.push({ kind: entry.kind, fileName: doc.file_name, receivedAt: Date.now() });
-        receivedByJob.set(entry.jobId, list);
-        await maybeMergeJob(entry.jobId);
-      }
-      pending.splice(matchIndex, 1);
-      savePending();
-    } catch (err) {
-      logger.error(`Lỗi khi tải file Telegram "${doc.file_name}":`, err);
+      return;
     }
   }
+
+  const matchIndex = pending.findIndex((entry) => matchesEntry(doc.file_name!, entry));
+  if (matchIndex === -1) {
+    logger.info(
+      `File "${doc.file_name}" đúng group/đúng người gửi nhưng KHÔNG khớp tên với bất kỳ mục nào đang chờ ` +
+        `(hiện có ${pending.length} mục chờ: ${pending.map((e) => `${path.basename(e.excelPath)}[${e.kind}]`).join(', ') || '(trống)'}).`,
+    );
+    return;
+  }
+
+  const entry = pending[matchIndex];
+  try {
+    await downloadTelegramFile(doc.file_id, doc.file_name);
+    logger.info(`Đã nhận + tải kết quả Telegram (${entry.kind}) cho ${path.basename(entry.excelPath)}: ${doc.file_name}`);
+    if (entry.jobId) {
+      const list = receivedByJob.get(entry.jobId) ?? [];
+      list.push({ kind: entry.kind, fileName: doc.file_name, receivedAt: Date.now() });
+      receivedByJob.set(entry.jobId, list);
+      await maybeMergeJob(entry.jobId);
+    }
+    pending.splice(matchIndex, 1);
+    savePending();
+  } catch (err) {
+    logger.error(`Lỗi khi tải file Telegram "${doc.file_name}":`, err);
+  }
+}
+
+/**
+ * So sánh chuỗi bí mật Telegram gửi kèm mỗi request webhook (header X-Telegram-Bot-Api-Secret-
+ * Token) với giá trị đã đăng ký — dùng ở route webhook (server.ts) để từ chối request không phải
+ * thật sự từ Telegram TRƯỚC KHI xử lý gì cả.
+ */
+export function verifyWebhookSecret(headerValue: string | undefined): boolean {
+  return headerValue !== undefined && headerValue === config.telegramWebhookSecret;
+}
+
+/**
+ * Đăng ký webhook với Telegram — gọi 1 LẦN lúc khởi động (không phải vòng lặp liên tục như
+ * getUpdates cũ), nên dù có lỡ gặp đúng lúc mạng chập chờn cũng chỉ cần thử lại vài lần là xong,
+ * không ảnh hưởng gì sau đó (từ lúc này Telegram tự gửi update tới, mình không cần chủ động gọi
+ * ra ngoài nữa — né hẳn vấn đề kết nối ra ngoài chập chờn đã gặp với getUpdates).
+ */
+async function registerWebhook(maxAttempts = 5): Promise<void> {
+  const token = config.telegramBotToken;
+  const webhookUrl = `https://api.telegram.org/bot${token}/setWebhook`;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetchWithTimeout(webhookUrl, 20_000, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: config.telegramWebhookPublicUrl,
+          secret_token: config.telegramWebhookSecret,
+          allowed_updates: ['message'],
+        }),
+      });
+      const data = (await res.json()) as { ok: boolean; description?: string };
+      if (!data.ok) throw new Error(`Telegram setWebhook thất bại: ${JSON.stringify(data)}`);
+      logger.info(`Đã đăng ký webhook Telegram: ${config.telegramWebhookPublicUrl}`);
+      return;
+    } catch (err) {
+      lastErr = err;
+      logger.warn(`Đăng ký webhook Telegram lần ${attempt}/${maxAttempts} thất bại, thử lại...`, err);
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+  }
+  logger.error(
+    `Không đăng ký được webhook Telegram sau ${maxAttempts} lần thử — bộ phận theo dõi kết quả Telegram sẽ KHÔNG hoạt động cho tới khi restart lại thành công.`,
+    lastErr,
+  );
 }
 
 /**
@@ -404,9 +434,11 @@ function checkTimeouts(): void {
 }
 
 /**
- * Bắt đầu theo dõi group Telegram (chạy nền, vòng lặp vô hạn, tách biệt hoàn toàn với hàng đợi
- * Chrome) — gọi 1 lần lúc server khởi động. Tự bỏ qua (không làm gì) nếu chưa cấu hình đủ
- * TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID trong .env, không ảnh hưởng tới phần còn lại của web UI.
+ * Bắt đầu theo dõi group Telegram qua WEBHOOK (Telegram tự gửi tin nhắn mới tới, mình không còn
+ * chủ động hỏi liên tục như trước — xem `processIncomingUpdate` ở route webhook trong server.ts)
+ * — gọi 1 lần lúc server khởi động. Tự bỏ qua (không làm gì) nếu chưa cấu hình đủ
+ * TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID/TELEGRAM_WEBHOOK_PUBLIC_URL trong .env, không ảnh hưởng tới
+ * phần còn lại của web UI.
  */
 export function startTelegramWatcher(): void {
   if (started) return;
@@ -414,9 +446,16 @@ export function startTelegramWatcher(): void {
     logger.info('Chưa cấu hình TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID — bỏ qua theo dõi kết quả Telegram.');
     return;
   }
+  if (!config.telegramWebhookPublicUrl) {
+    logger.warn(
+      'Chưa cấu hình TELEGRAM_WEBHOOK_PUBLIC_URL — bỏ qua theo dõi kết quả Telegram (cần URL công khai ' +
+        'dạng https://.../telegram/webhook để Telegram gửi tin nhắn mới tới).',
+    );
+    return;
+  }
   started = true;
   loadPending();
-  logger.info(`Bắt đầu theo dõi kết quả Telegram (đang có ${pending.length} mục chờ từ trước, nếu có).`);
+  logger.info(`Bắt đầu theo dõi kết quả Telegram qua webhook (đang có ${pending.length} mục chờ từ trước, nếu có).`);
   if (config.telegramResultBotUsername) {
     logger.info(`Chỉ nhận file từ đúng người gửi: @${normalizeUsername(config.telegramResultBotUsername)}.`);
   } else {
@@ -426,16 +465,12 @@ export function startTelegramWatcher(): void {
     );
   }
 
-  void (async () => {
-    for (;;) {
-      mergePendingFromDisk();
-      try {
-        await pollOnce();
-      } catch (err) {
-        logger.error('Lỗi khi hỏi Telegram getUpdates:', err);
-        await new Promise((resolve) => setTimeout(resolve, 10_000));
-      }
-      checkTimeouts();
-    }
-  })();
+  void registerWebhook();
+
+  // Chỉ còn việc dọn dẹp cục bộ (đọc lại sổ chờ từ đĩa + kiểm tra quá hạn) chạy định kỳ — KHÔNG
+  // gọi mạng gì cả, nên không còn bị ảnh hưởng bởi lỗi kết nối ra ngoài chập chờn đã gặp trước đây.
+  setInterval(() => {
+    mergePendingFromDisk();
+    checkTimeouts();
+  }, LOCAL_MAINTENANCE_INTERVAL_MS);
 }
