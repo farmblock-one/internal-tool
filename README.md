@@ -69,6 +69,24 @@ Clone repo này về máy cá nhân (đã có sẵn Chrome), chạy `npm run apo
 thường. Sau đó copy toàn bộ thư mục `.chrome-profile` lên server, đúng đường dẫn khai trong
 `CHROME_USER_DATA_DIR` của `.env`.
 
+## Đăng nhập Teams + Gmail cho xử lý Risky (bắt buộc, làm 1 lần)
+
+Bước xử lý tiếp các lead Risky (bắt cURL Teams/Gmail rồi upload lên meetscript.io) dùng 1 Chrome
+profile **RIÊNG** với Apollo (`RISKY_CHROME_USER_DATA_DIR` trong `.env`, mặc định
+`./.chrome-profile-risky`) — tách biệt để hàng đợi Risky chạy **đồng thời** được với hàng đợi
+Apollo/Debounce mà không tranh nhau khoá 1 profile Chrome (2 Chrome mở cùng 1 profile sẽ làm
+nhau crash, đã xác nhận thực tế). Vì là profile mới hoàn toàn nên **không có sẵn session Teams/
+Gmail** từ profile Apollo cũ — phải đăng nhập lại 1 lần ở đây.
+
+Làm tương tự Cách A/B ở mục đăng nhập Apollo phía trên, chỉ đổi lệnh:
+
+```bash
+DISPLAY=:99 npm run risky:login
+```
+
+Lệnh này mở sẵn 2 tab (Microsoft Teams + Gmail) — đăng nhập xong cả 2 rồi quay lại terminal, nhấn
+Enter để lưu session.
+
 ## Chạy luồng (dòng lệnh, qua SSH)
 
 ```bash
@@ -109,8 +127,17 @@ Cách khuyến nghị là setup Caddy để có HTTPS thật (xem mục ngay dư
 - **Đặt `WEBUI_PASSWORD` trong `.env` trước khi chạy** — không đặt mật khẩu thì bất kỳ ai vào được
   trang cũng chạy được luồng (tốn tiền Apollo/Debounce thật). Trình duyệt sẽ tự hỏi mật khẩu 1 lần
   (không cần tên đăng nhập, để trống hoặc gõ gì cũng được).
-- Web UI chỉ chạy 1 luồng tại 1 thời điểm (xếp hàng lần lượt) vì tất cả dùng chung 1 Chrome
-  profile đã đăng nhập Apollo — chạy song song sẽ làm nhau crash.
+- Có **2 hàng đợi độc lập**, mỗi hàng đợi dùng 1 Chrome profile riêng nên chạy **đồng thời** được
+  với nhau (nhưng trong CÙNG 1 hàng đợi vẫn chỉ chạy 1 job tại 1 thời điểm, xếp hàng lần lượt —
+  chạy 2 job chung 1 profile Chrome sẽ làm nhau crash):
+  - Hàng đợi **Apollo/Debounce** (profile `CHROME_USER_DATA_DIR`).
+  - Hàng đợi **Risky** (Teams/Gmail &rarr; meetscript.io, profile `RISKY_CHROME_USER_DATA_DIR`) —
+    tự động được đẩy vào ngay khi job Apollo/Debounce tương ứng chạy xong (không cần bấm nút gì
+    thêm), và **không chặn** job Apollo/Debounce mới của người khác nữa dù list lớn có thể mất
+    hàng giờ để xử lý xong Risky.
+- Nếu 1 list Risky bị tách thành nhiều phần (>1000 lead, giới hạn của meetscript.io), các phần
+  được upload **song song** (tối đa `RISKY_CONCURRENCY` lượt cùng lúc, mặc định 5) thay vì lần
+  lượt — trang trạng thái của job Risky hiển thị tiến trình kiểu "12/60 lượt" theo thời gian thực.
 - Danh sách job hiện chỉ lưu trong bộ nhớ — tắt/khởi động lại server sẽ mất lịch sử hiển thị trên
   web (các file kết quả trên đĩa thì KHÔNG mất, vẫn nằm trong `data/processed/`).
 

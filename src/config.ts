@@ -7,6 +7,15 @@ function required(name: string, value: string | undefined): string {
 
 export const config = {
   chromeUserDataDir: process.env.CHROME_USER_DATA_DIR ?? './.chrome-profile',
+  // Profile Chrome RIÊNG cho Teams/Gmail/meetscript.io — tách khỏi profile Apollo ở trên để 2 hàng
+  // đợi (Apollo/Debounce và Risky) chạy được ĐỒNG THỜI, không tranh nhau khoá 1 profile (2 Chrome
+  // cùng mở 1 user-data-dir sẽ crash lẫn nhau). Phải đăng nhập riêng profile này bằng `npm run
+  // risky:login` trước khi dùng lần đầu — cookie không dùng chung với profile Apollo.
+  riskyChromeUserDataDir: process.env.RISKY_CHROME_USER_DATA_DIR ?? './.chrome-profile-risky',
+  // Số tab/task xử lý song song tối đa khi upload các phần (chunk) lên meetscript.io — meetscript.io/
+  // Teams/Gmail không giới hạn số request đồng thời từ cùng 1 tài khoản (đã xác nhận), nên chạy song
+  // song giúp rút ngắn đáng kể thời gian xử lý list lớn (25-30K lead = 25-30 chunk/50-60 lượt upload).
+  riskyConcurrency: Number(process.env.RISKY_CONCURRENCY ?? '5'),
   headless: process.env.HEADLESS === 'true',
   get debounceApiKey(): string {
     return required('DEBOUNCE_API_KEY', process.env.DEBOUNCE_API_KEY);

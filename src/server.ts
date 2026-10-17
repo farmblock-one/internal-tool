@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
+import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
+import { openPersistentChrome } from './browser.js';
 import { startTelegramWatcher } from './telegram-watcher.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
@@ -12,59 +14,144 @@ import { isValidOutputFileName } from './filename-utils.js';
 const PROCESSED_DIR = path.resolve('data/processed');
 const ASSETS_DIR = path.resolve('assets');
 
-interface Job {
+type JobStatus = 'queued' | 'running' | 'done' | 'error';
+
+interface MainJob {
+  kind: 'main';
   id: string;
   listUrl: string;
   outputFileName: string;
-  status: 'queued' | 'running' | 'done' | 'error';
+  status: JobStatus;
   logs: string[];
   createdAt: number;
   finishedAt?: number;
   error?: string;
-  // 1 luồng liền mạch: Apollo -> Debounce -> file Excel/Risky -> ngay lập tức xử lý tiếp Risky
-  // (Teams/Gmail -> meetscript.io), không cần bấm nút nào thêm. `result` chỉ có khi status='done'.
   result?: FlowResult;
+  // Gắn ngay khi job Apollo/Debounce này chạy xong thành công và tự động đẩy job Risky tiếp theo
+  // vào HÀNG ĐỢI RIÊNG (xem RiskyJob) — để trang trạng thái của job này có thể dẫn sang theo dõi
+  // tiếp tiến trình Risky (vẫn 1 luồng liền mạch, không cần bấm nút nào thêm).
+  riskyJobId?: string;
 }
 
-const jobs = new Map<string, Job>();
-const queue: string[] = [];
-let processing = false;
+interface RiskyJob {
+  kind: 'risky';
+  id: string;
+  riskyPath: string;
+  // Tên file output của job Apollo/Debounce sinh ra file Risky này — chỉ để hiển thị cho dễ nhận biết.
+  sourceLabel: string;
+  status: JobStatus;
+  logs: string[];
+  createdAt: number;
+  finishedAt?: number;
+  error?: string;
+  // "12/60" — cập nhật realtime khi từng lượt upload song song lên meetscript.io hoàn tất.
+  progress?: string;
+  // undefined = chưa chạy xong; null = chạy xong nhưng file Risky không có lead nào.
+  result?: RiskyFlowResult | null;
+}
 
-function enqueueJob(listUrl: string, outputFileName: string): Job {
+type Job = MainJob | RiskyJob;
+
+const jobs = new Map<string, Job>();
+
+// 2 HÀNG ĐỢI RIÊNG BIỆT, chạy ĐỘC LẬP (mỗi hàng đợi 1 Chrome profile riêng — xem config.ts):
+//   - mainQueue: Apollo export -> Debounce verify, dùng profile Apollo (CHROME_USER_DATA_DIR).
+//   - riskyQueue: Teams/Gmail -> meetscript.io, dùng profile Risky (RISKY_CHROME_USER_DATA_DIR).
+// Tách riêng để list lớn (xử lý Risky có thể mất hàng giờ) không còn chặn người khác chạy job
+// Apollo mới — 2 hàng đợi chạy song song được vì dùng 2 Chrome profile khác nhau.
+const mainQueue: string[] = [];
+let mainProcessing = false;
+const riskyQueue: string[] = [];
+let riskyProcessing = false;
+
+function isRiskyJob(job: Job): job is RiskyJob {
+  return job.kind === 'risky';
+}
+
+function enqueueMainJob(listUrl: string, outputFileName: string): MainJob {
   const id = crypto.randomBytes(6).toString('hex');
-  const job: Job = { id, listUrl, outputFileName, status: 'queued', logs: [], createdAt: Date.now() };
+  const job: MainJob = { kind: 'main', id, listUrl, outputFileName, status: 'queued', logs: [], createdAt: Date.now() };
   jobs.set(id, job);
-  queue.push(id);
-  void processQueue();
+  mainQueue.push(id);
+  void processMainQueue();
   return job;
 }
 
-// Chạy ĐÚNG 1 job tại 1 thời điểm — toàn bộ automation dùng chung 1 Chrome profile đã đăng nhập
-// (xem browser.ts), chạy 2 job song song sẽ tranh nhau cùng 1 profile và làm nhau crash.
-async function processQueue(): Promise<void> {
-  if (processing) return;
-  processing = true;
+function enqueueRiskyJob(riskyPath: string, sourceLabel: string): RiskyJob {
+  const id = crypto.randomBytes(6).toString('hex');
+  const job: RiskyJob = { kind: 'risky', id, riskyPath, sourceLabel, status: 'queued', logs: [], createdAt: Date.now() };
+  jobs.set(id, job);
+  riskyQueue.push(id);
+  void processRiskyQueue();
+  return job;
+}
+
+// Chạy ĐÚNG 1 job Apollo/Debounce tại 1 thời điểm — dùng chung 1 Chrome profile Apollo đã đăng
+// nhập, chạy 2 job song song sẽ tranh nhau cùng 1 profile và làm nhau crash.
+async function processMainQueue(): Promise<void> {
+  if (mainProcessing) return;
+  mainProcessing = true;
   try {
-    while (queue.length > 0) {
-      const id = queue.shift();
+    while (mainQueue.length > 0) {
+      const id = mainQueue.shift();
       const job = id ? jobs.get(id) : undefined;
-      if (!job) continue;
+      if (!job || job.kind !== 'main') continue;
       job.status = 'running';
       await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
         try {
           job.result = await runFlow(job.listUrl, job.outputFileName);
           job.status = 'done';
+          // Tự động đẩy tiếp bước xử lý Risky (Teams/Gmail -> meetscript.io) vào hàng đợi RIÊNG —
+          // vẫn là 1 luồng liền mạch, không cần bấm nút nào thêm, nhưng không còn chặn job
+          // Apollo/Debounce tiếp theo của người khác nữa.
+          const riskyJob = enqueueRiskyJob(job.result.riskyPath, job.outputFileName || job.id);
+          job.riskyJobId = riskyJob.id;
         } catch (err) {
           job.status = 'error';
           job.error = err instanceof Error ? err.message : String(err);
-          logger.error('Job lỗi:', err);
+          logger.error('Job Apollo/Debounce lỗi:', err);
         } finally {
           job.finishedAt = Date.now();
         }
       });
     }
   } finally {
-    processing = false;
+    mainProcessing = false;
+  }
+}
+
+// Chạy ĐÚNG 1 job Risky tại 1 thời điểm (nhưng BÊN TRONG 1 job, nhiều lượt upload chạy SONG SONG
+// — xem risky-pipeline.ts) — dùng chung 1 Chrome profile Risky riêng, tách biệt hoàn toàn với
+// profile Apollo nên chạy đồng thời được với mainQueue ở trên.
+async function processRiskyQueue(): Promise<void> {
+  if (riskyProcessing) return;
+  riskyProcessing = true;
+  try {
+    while (riskyQueue.length > 0) {
+      const id = riskyQueue.shift();
+      const job = id ? jobs.get(id) : undefined;
+      if (!job || job.kind !== 'risky') continue;
+      job.status = 'running';
+      await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
+        let context: Awaited<ReturnType<typeof openPersistentChrome>> | undefined;
+        try {
+          context = await openPersistentChrome(config.riskyChromeUserDataDir);
+          job.result = await runRiskyFlow(job.riskyPath, context, (done, total) => {
+            job.progress = `${done}/${total}`;
+          });
+          job.status = 'done';
+        } catch (err) {
+          job.status = 'error';
+          job.error = err instanceof Error ? err.message : String(err);
+          logger.error('Job Risky lỗi:', err);
+        } finally {
+          await context?.close().catch(() => {});
+          job.finishedAt = Date.now();
+        }
+      });
+    }
+  } finally {
+    riskyProcessing = false;
   }
 }
 
@@ -171,6 +258,9 @@ function pageLayout(title: string, body: string): string {
   .status-running { background: #e3a008; }
   .status-done { background: #1a9d6c; }
   .status-error { background: #d33a3a; }
+  .tag { padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; display: inline-block; }
+  .tag-main { background: #e4f3fb; color: var(--nsc-dark); }
+  .tag-risky { background: #fdeedd; color: #a85b00; }
   pre {
     background: #102330; color: #d9e8ef; padding: 14px; border-radius: 8px; overflow-x: auto;
     white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; max-height: 60vh; overflow-y: auto;
@@ -201,9 +291,13 @@ ${body}
 </html>`;
 }
 
+function jobLabel(job: Job): string {
+  return job.kind === 'main' ? job.outputFileName || job.id : `Risky — ${job.sourceLabel}`;
+}
+
 function renderHome(errorMessage?: string): string {
   const allJobs = [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
-  // "running" chỉ có tối đa 1 job (processQueue chạy tuần tự), nhưng "queued" có thể nhiều người
+  // "running" tối đa 1 job/hàng đợi (mỗi hàng đợi chạy tuần tự), nhưng "queued" có thể nhiều người
   // cùng bấm — liệt kê hết để ai mở trang cũng thấy ngay đang có bao nhiêu người xếp hàng trước.
   const activeJobs = allJobs.filter((j) => j.status === 'queued' || j.status === 'running');
   const recentJobs = allJobs.slice(0, 20);
@@ -218,21 +312,24 @@ function renderHome(errorMessage?: string): string {
             ${activeJobs
               .map(
                 (j) =>
-                  `<li><a href="/jobs/${j.id}">${escapeHtml(j.outputFileName || j.id)}</a> — ` +
-                  `<span class="status status-${j.status}">${j.status}</span> ` +
+                  `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> ` +
+                  `<span class="tag ${j.kind === 'main' ? 'tag-main' : 'tag-risky'}">${j.kind === 'main' ? 'Apollo' : 'Risky'}</span> — ` +
+                  `<span class="status status-${j.status}">${j.status}</span>` +
+                  `${isRiskyJob(j) && j.progress ? ` (${escapeHtml(j.progress)})` : ''} ` +
                   `(bắt đầu lúc ${new Date(j.createdAt).toLocaleString('vi-VN')})</li>`,
               )
               .join('')}
           </ul>
-          <p>Mỗi lần chỉ chạy 1 luồng — nếu bạn bấm "Bắt đầu chạy" bây giờ, luồng của bạn sẽ tự xếp hàng chờ (các) luồng trên chạy xong trước, không chạy song song được.</p>
+          <p>Mỗi loại luồng (Apollo/Debounce và Risky) chỉ chạy 1 job tại 1 thời điểm — nhưng 2 loại chạy ĐỒNG THỜI được với nhau (dùng 2 Chrome profile riêng), không cần đợi nhau.</p>
         </div>`
       : '';
 
   const rows = recentJobs
     .map(
       (j) => `<tr>
-        <td><a href="/jobs/${j.id}">${escapeHtml(j.outputFileName || j.id)}</a></td>
-        <td><span class="status status-${j.status}">${j.status}</span></td>
+        <td><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a></td>
+        <td><span class="tag ${j.kind === 'main' ? 'tag-main' : 'tag-risky'}">${j.kind === 'main' ? 'Apollo' : 'Risky'}</span></td>
+        <td><span class="status status-${j.status}">${j.status}</span>${isRiskyJob(j) && j.status === 'running' && j.progress ? ` ${escapeHtml(j.progress)}` : ''}</td>
         <td>${new Date(j.createdAt).toLocaleString('vi-VN')}</td>
       </tr>`,
     )
@@ -263,48 +360,37 @@ ${banner}
 </div>
 
 <h2>Các lần chạy gần đây</h2>
-${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên file</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
+${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên file</th><th>Loại</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
 `;
   return pageLayout(BRAND_NAME, body);
 }
 
-function renderJob(job: Job): string {
+function renderMainJob(job: MainJob): string {
   const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
   const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
 
   let resultBlock = '';
   if (job.status === 'done' && job.result) {
     const { result } = job;
-    const riskyBlock =
-      result.riskyResult === null
-        ? `<p style="margin-top:16px">File Risky không có lead nào — không cần xử lý gì thêm.</p>`
-        : result.riskyResult
-          ? `<div style="margin-top:16px">
-              <p><strong>Đã xử lý xong Risky${result.riskyResult.chunks.length > 1 ? ` (tách thành ${result.riskyResult.chunks.length} phần do vượt giới hạn 1000 lead/lần của meetscript.io)` : ''} — kết quả thật (file Excel Team/Google) sẽ được bot Telegram gửi riêng.</strong></p>
-              ${result.riskyResult.chunks
-                .map(
-                  (chunk, i) => `
-                <div style="margin-top:12px">
-                  ${result.riskyResult!.chunks.length > 1 ? `<p><strong>Phần ${i + 1}/${result.riskyResult!.chunks.length}</strong> (${escapeHtml(path.basename(chunk.excelPath))}):</p>` : ''}
-                  <p>Ảnh xác nhận upload tab TEAM:</p>
-                  <img src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
-                  <p style="margin-top:12px">Ảnh xác nhận upload tab GOOGLE:</p>
-                  <img src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
-                </div>`,
-                )
-                .join('')}
-            </div>`
-          : '';
-    const riskyErrorBlock = result.riskyError
-      ? `<div class="nsc-error" style="margin-top:16px"><strong>Bước xử lý Risky bị lỗi:</strong> ${escapeHtml(result.riskyError)}<br/>(File Excel/Risky CSV ở trên vẫn dùng được bình thường — chỉ cần xử lý lại riêng phần Risky.)</div>`
-      : '';
+    let riskyLinkBlock = '';
+    if (job.riskyJobId) {
+      const riskyJob = jobs.get(job.riskyJobId);
+      if (riskyJob && isRiskyJob(riskyJob)) {
+        riskyLinkBlock = `
+          <p style="margin-top:16px">
+            Bước xử lý Risky (Teams/Gmail &rarr; meetscript.io):
+            <a href="/jobs/${riskyJob.id}">xem tiến trình</a> —
+            <span class="status status-${riskyJob.status}">${riskyJob.status}</span>
+            ${riskyJob.status === 'running' && riskyJob.progress ? ` (${escapeHtml(riskyJob.progress)})` : ''}
+          </p>`;
+      }
+    }
     resultBlock = `
       <p>
         <a href="/jobs/${job.id}/download/xlsx">Tải file Excel (${escapeHtml(path.basename(result.masterXlsxPath))})</a><br/>
         <a href="/jobs/${job.id}/download/risky">Tải file Risky CSV (${escapeHtml(path.basename(result.riskyPath))})</a>
       </p>
-      ${riskyBlock}
-      ${riskyErrorBlock}
+      ${riskyLinkBlock}
     `;
   }
 
@@ -312,7 +398,7 @@ function renderJob(job: Job): string {
 ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 <a class="nsc-back" href="/">&larr; Quay lại</a>
 <div class="nsc-card">
-  <p style="margin-top:0"><strong>${escapeHtml(job.outputFileName || job.id)}</strong></p>
+  <p style="margin-top:0"><strong>${escapeHtml(job.outputFileName || job.id)}</strong> <span class="tag tag-main">Apollo</span></p>
   <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
   <p>List Apollo: ${escapeHtml(job.listUrl)}</p>
   ${resultBlock}
@@ -323,6 +409,61 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 <pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
 `;
   return pageLayout(`${job.outputFileName || job.id} — ${BRAND_NAME}`, body);
+}
+
+function renderRiskyJob(job: RiskyJob): string {
+  const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
+  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
+
+  const progressBlock =
+    job.status === 'running' && job.progress
+      ? `<p>Tiến trình upload meetscript.io: <strong>${escapeHtml(job.progress)}</strong> lượt</p>`
+      : '';
+
+  let resultBlock = '';
+  if (job.status === 'done') {
+    if (job.result === null) {
+      resultBlock = `<p style="margin-top:16px">File Risky không có lead nào — không cần xử lý gì thêm.</p>`;
+    } else if (job.result) {
+      const { chunks } = job.result;
+      resultBlock = `
+        <div style="margin-top:16px">
+          <p><strong>Đã xử lý xong Risky${chunks.length > 1 ? ` (tách thành ${chunks.length} phần do vượt giới hạn 1000 lead/lần của meetscript.io, xử lý song song)` : ''} — kết quả thật (file Excel Team/Google) sẽ được bot Telegram gửi riêng.</strong></p>
+          ${chunks
+            .map(
+              (chunk, i) => `
+            <div style="margin-top:12px">
+              ${chunks.length > 1 ? `<p><strong>Phần ${i + 1}/${chunks.length}</strong> (${escapeHtml(path.basename(chunk.excelPath))}):</p>` : ''}
+              <p>Ảnh xác nhận upload tab TEAM:</p>
+              <img src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+              <p style="margin-top:12px">Ảnh xác nhận upload tab GOOGLE:</p>
+              <img src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
+            </div>`,
+            )
+            .join('')}
+        </div>`;
+    }
+  }
+
+  const body = `
+${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
+<a class="nsc-back" href="/">&larr; Quay lại</a>
+<div class="nsc-card">
+  <p style="margin-top:0"><strong>Risky — ${escapeHtml(job.sourceLabel)}</strong> <span class="tag tag-risky">Risky</span></p>
+  <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
+  ${progressBlock}
+  ${resultBlock}
+  ${errorBlock}
+</div>
+
+<h2>Log</h2>
+<pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
+`;
+  return pageLayout(`Risky — ${job.sourceLabel} — ${BRAND_NAME}`, body);
+}
+
+function renderJob(job: Job): string {
+  return job.kind === 'main' ? renderMainJob(job) : renderRiskyJob(job);
 }
 
 function serveDownload(res: http.ServerResponse, filePath: string): void {
@@ -387,7 +528,7 @@ const server = http.createServer((req, res) => {
         res.end();
         return;
       }
-      const job = enqueueJob(listUrl, outputFileName);
+      const job = enqueueMainJob(listUrl, outputFileName);
       res.writeHead(303, { Location: `/jobs/${job.id}` });
       res.end();
       return;
@@ -409,7 +550,7 @@ const server = http.createServer((req, res) => {
     const downloadMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/download\/(xlsx|risky)$/);
     if (req.method === 'GET' && downloadMatch) {
       const job = jobs.get(downloadMatch[1]);
-      if (!job?.result) {
+      if (!job || job.kind !== 'main' || !job.result) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy file để tải.');
         return;
@@ -422,7 +563,7 @@ const server = http.createServer((req, res) => {
     const screenshotMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/screenshot\/(\d+)\/(team|google)$/);
     if (req.method === 'GET' && screenshotMatch) {
       const job = jobs.get(screenshotMatch[1]);
-      const chunk = job?.result?.riskyResult?.chunks[Number(screenshotMatch[2])];
+      const chunk = job && job.kind === 'risky' && job.result ? job.result.chunks[Number(screenshotMatch[2])] : undefined;
       if (!chunk) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Không tìm thấy ảnh kết quả.');
@@ -452,7 +593,7 @@ const server = http.createServer((req, res) => {
 
 fs.mkdirSync(PROCESSED_DIR, { recursive: true });
 
-// Chạy độc lập hoàn toàn với hàng đợi Chrome — chỉ gọi API Telegram thuần, không cần Chrome,
+// Chạy độc lập hoàn toàn với 2 hàng đợi Chrome — chỉ gọi API Telegram thuần, không cần Chrome,
 // không chặn/bị chặn bởi các job khác.
 startTelegramWatcher();
 

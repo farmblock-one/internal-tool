@@ -13,12 +13,12 @@ import { cleanupChromeProfile } from './chrome-cleanup.js';
  *   npx playwright install chrome
  * hoặc cài google-chrome-stable qua apt.
  */
-export async function openPersistentChrome(): Promise<BrowserContext> {
+export async function openPersistentChrome(profileDir: string = config.chromeUserDataDir): Promise<BrowserContext> {
   // Dọn sạch mọi tiến trình Chrome cũ (zombie từ lần crash trước) còn giữ khoá trên profile này
   // trước khi mở mới — 2 Chrome tranh nhau 1 profile là nguyên nhân đã xác nhận gây crash lặp lại.
-  cleanupChromeProfile(config.chromeUserDataDir);
+  cleanupChromeProfile(profileDir);
 
-  const context = await chromium.launchPersistentContext(config.chromeUserDataDir, {
+  const context = await chromium.launchPersistentContext(profileDir, {
     channel: 'chrome',
     headless: config.headless,
     viewport: { width: 1440, height: 900 },
