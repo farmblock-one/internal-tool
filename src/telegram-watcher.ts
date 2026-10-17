@@ -24,6 +24,16 @@ interface PendingEntry {
   // theo dõi, vẫn tự động lưu nếu bot trả kết quả muộn hơn dự kiến, chỉ để hiển thị cảnh báo lên
   // web UI (xem `getTelegramWatchStatus`) và tránh log lặp lại cảnh báo mỗi lần poll (~30s/lần).
   warnedAt?: number;
+  // ID của RiskyJob (server.ts) sinh ra mục chờ này — dùng để hiện "đã nhận X/Y kết quả" ngay
+  // trên trang trạng thái của ĐÚNG job đó (xem `getJobTelegramStatus`). Không có khi gọi từ CLI
+  // (`npm run risky`), lúc đó không có job nào trên web UI để gắn tiến trình vào.
+  jobId?: string;
+}
+
+interface ReceivedEntry {
+  kind: ResultKind;
+  fileName: string;
+  receivedAt: number;
 }
 
 export interface TelegramWatchStatus {
@@ -31,12 +41,31 @@ export interface TelegramWatchStatus {
   overdue: PendingEntry[];
 }
 
+export interface JobTelegramStatus {
+  pendingCount: number;
+  received: ReceivedEntry[];
+}
+
 /** Dùng cho trang web UI — hiện số file đang chờ + danh sách file đã quá hạn cảnh báo. */
 export function getTelegramWatchStatus(): TelegramWatchStatus {
   return { pending, overdue: pending.filter((entry) => entry.warnedAt !== undefined) };
 }
 
+/**
+ * Dùng cho trang trạng thái của 1 RiskyJob cụ thể (xem `renderRiskyJob` trong server.ts) — biết
+ * được đã nhận bao nhiêu/kết quả nào rồi, còn bao nhiêu đang chờ, CHỈ TÍNH riêng cho job này.
+ */
+export function getJobTelegramStatus(jobId: string): JobTelegramStatus {
+  return {
+    pendingCount: pending.filter((e) => e.jobId === jobId).length,
+    received: receivedByJob.get(jobId) ?? [],
+  };
+}
+
 let pending: PendingEntry[] = [];
+// Chỉ lưu trong bộ nhớ (không cần ghi đĩa) — tương tự danh sách job trong server.ts, mất khi
+// restart server cũng không sao, vì bản thân job đó cũng không còn hiện trên web UI nữa.
+const receivedByJob = new Map<string, ReceivedEntry[]>();
 let updateOffset = 0;
 let started = false;
 
@@ -91,8 +120,8 @@ function mergePendingFromDisk(): void {
  * (lưu trên đĩa, sống sót qua restart) để bộ phận theo dõi Telegram (chạy nền, độc lập hoàn toàn
  * với hàng đợi Chrome) biết cần đợi đúng file kết quả nào.
  */
-export function registerExpectedTelegramFile(excelPath: string, kind: ResultKind): void {
-  pending.push({ excelPath, kind, registeredAt: Date.now() });
+export function registerExpectedTelegramFile(excelPath: string, kind: ResultKind, jobId?: string): void {
+  pending.push({ excelPath, kind, registeredAt: Date.now(), jobId });
   savePending();
   logger.info(`Đã ghi vào sổ chờ Telegram: đợi kết quả ${kind} cho ${path.basename(excelPath)}.`);
 }
@@ -176,6 +205,11 @@ async function pollOnce(): Promise<void> {
     try {
       await downloadTelegramFile(doc.file_id, doc.file_name);
       logger.info(`Đã nhận + tải kết quả Telegram (${entry.kind}) cho ${path.basename(entry.excelPath)}: ${doc.file_name}`);
+      if (entry.jobId) {
+        const list = receivedByJob.get(entry.jobId) ?? [];
+        list.push({ kind: entry.kind, fileName: doc.file_name, receivedAt: Date.now() });
+        receivedByJob.set(entry.jobId, list);
+      }
       pending.splice(matchIndex, 1);
       savePending();
     } catch (err) {

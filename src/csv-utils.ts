@@ -61,6 +61,33 @@ export function dropRowsByColumnValue(rows: Row[], columnAliases: string[], excl
 }
 
 /**
+ * Ghép thêm các cột MỚI từ `extraRows` (vd kết quả Debounce: RESULT/REASON/STATUS CODE/ROLE/
+ * FREE/DOMAIN) vào đúng row tương ứng trong `baseRows` (vd file Apollo gốc, đầy đủ cột) theo
+ * EMAIL — không theo thứ tự dòng, vì Debounce có thể trả về khác thứ tự với file gửi lên. Cột
+ * trùng tên hiếm khi xảy ra (vd lỡ cả 2 bên đều có cột DOMAIN) sẽ bị GHI ĐÈ bởi giá trị từ
+ * `extraRows` (coi là thông tin mới hơn). Row bên `baseRows` không tìm được dòng khớp bên
+ * `extraRows` vẫn giữ nguyên, không bị loại bỏ (merge, không phải inner join).
+ */
+export function mergeByEmail(baseRows: Row[], extraRows: Row[]): Row[] {
+  if (baseRows.length === 0 || extraRows.length === 0) return baseRows;
+  const baseEmailCol = findColumn(baseRows, ['email']);
+  const extraEmailCol = findColumn(extraRows, ['email']);
+  const extraByEmail = new Map<string, Row>();
+  for (const row of extraRows) {
+    const email = (row[extraEmailCol] ?? '').trim().toLowerCase();
+    if (email) extraByEmail.set(email, row);
+  }
+  return baseRows.map((row) => {
+    const email = (row[baseEmailCol] ?? '').trim().toLowerCase();
+    const extra = extraByEmail.get(email);
+    if (!extra) return row;
+    const newColumns = { ...extra };
+    delete newColumns[extraEmailCol]; // đã có cột email riêng từ baseRows, không cần nhân đôi
+    return { ...row, ...newColumns };
+  });
+}
+
+/**
  * Xoá hẳn 1 số cột khỏi toàn bộ rows (so tên không phân biệt hoa/thường) — dùng để bỏ các cột
  * không cần gửi qua Debounce (vd "Contact Owner", "Account Owner"). Cột nào không có trong file
  * thì bỏ qua, không báo lỗi (không phải mọi export đều chắc chắn có đủ các cột này).

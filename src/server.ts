@@ -5,7 +5,7 @@ import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
 import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
 import { openPersistentChrome } from './browser.js';
-import { startTelegramWatcher, getTelegramWatchStatus } from './telegram-watcher.js';
+import { startTelegramWatcher, getTelegramWatchStatus, getJobTelegramStatus } from './telegram-watcher.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -136,9 +136,14 @@ async function processRiskyQueue(): Promise<void> {
         let context: Awaited<ReturnType<typeof openPersistentChrome>> | undefined;
         try {
           context = await openPersistentChrome(config.riskyChromeUserDataDir);
-          job.result = await runRiskyFlow(job.riskyPath, context, (done, total) => {
-            job.progress = `${done}/${total}`;
-          });
+          job.result = await runRiskyFlow(
+            job.riskyPath,
+            context,
+            (done, total) => {
+              job.progress = `${done}/${total}`;
+            },
+            job.id,
+          );
           job.status = 'done';
         } catch (err) {
           job.status = 'error';
@@ -439,7 +444,18 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 }
 
 function renderRiskyJob(job: RiskyJob): string {
-  const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
+  // Tổng số kết quả MONG ĐỢI từ Telegram = 2 (TEAM + GOOGLE) cho mỗi phần đã tách — chỉ biết được
+  // sau khi upload xong (job.result khác null/undefined). File Risky rỗng (result === null) thì
+  // không có gì để chờ Telegram cả.
+  const telegramStatus = getJobTelegramStatus(job.id);
+  const expectedTelegramTotal = job.result ? job.result.chunks.length * 2 : 0;
+  const receivedCount = telegramStatus.received.length;
+  const telegramAllReceived = expectedTelegramTotal > 0 && receivedCount >= expectedTelegramTotal;
+
+  // Vẫn tự refresh trang dù job đã "done" (upload xong) nếu CHƯA nhận đủ kết quả thật từ Telegram
+  // — 2 việc khác nhau: "done" chỉ nghĩa là đã upload xong lên meetscript.io, chưa chắc đã có kết
+  // quả thật (bot có thể mất tới 1-2 tiếng mới trả lời).
+  const shouldAutoRefresh = job.status === 'queued' || job.status === 'running' || (expectedTelegramTotal > 0 && !telegramAllReceived);
   const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
 
   const progressBlock =
@@ -472,6 +488,21 @@ function renderRiskyJob(job: RiskyJob): string {
     }
   }
 
+  let telegramBlock = '';
+  if (expectedTelegramTotal > 0) {
+    telegramBlock = telegramAllReceived
+      ? `<p style="margin-top:16px;color:#1a9d6c"><strong>✅ Đã nhận đủ ${receivedCount}/${expectedTelegramTotal} kết quả thật từ Telegram.</strong></p>`
+      : `<p style="margin-top:16px"><strong>📨 Đã nhận ${receivedCount}/${expectedTelegramTotal} kết quả thật từ Telegram</strong> — đang tiếp tục chờ phần còn lại (bot meetscript.io có thể mất tới 1-2 tiếng).</p>`;
+    if (telegramStatus.received.length > 0) {
+      telegramBlock += `<ul style="margin-top:6px;font-size:0.88rem">${telegramStatus.received
+        .map(
+          (r) =>
+            `<li>${escapeHtml(r.fileName)} (${r.kind}) — lúc ${new Date(r.receivedAt).toLocaleString('vi-VN')}</li>`,
+        )
+        .join('')}</ul>`;
+    }
+  }
+
   const body = `
 ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 <a class="nsc-back" href="/">&larr; Quay lại</a>
@@ -480,6 +511,7 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
   <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
   ${progressBlock}
   ${resultBlock}
+  ${telegramBlock}
   ${errorBlock}
 </div>
 

@@ -80,6 +80,10 @@ export async function runRiskyFlow(
   riskyCsvPath: string,
   context: BrowserContext,
   onProgress?: (done: number, total: number) => void,
+  // ID của RiskyJob (server.ts) — truyền xuống để đăng ký vào sổ chờ Telegram kèm đúng job, cho
+  // phép trang trạng thái job đó hiện "đã nhận X/Y kết quả". Không có khi chạy qua CLI (process-
+  // risky.ts) — vẫn hoạt động bình thường, chỉ là không hiện được tiến trình theo job cụ thể.
+  jobId?: string,
 ): Promise<RiskyFlowResult | null> {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
   fs.mkdirSync(PROCESSED_DIR, { recursive: true });
@@ -140,7 +144,7 @@ export async function runRiskyFlow(
         const screenshotPath = await uploadRiskyToMeetscript(context, curl, excelPath, DOWNLOAD_DIR, task.kind);
         // Đăng ký "sổ chờ" ngay sau khi upload thành công — bộ phận theo dõi Telegram (chạy nền,
         // tách biệt) sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi vào group.
-        registerExpectedTelegramFile(excelPath, task.kind);
+        registerExpectedTelegramFile(excelPath, task.kind, jobId);
         return { chunkIndex: task.chunkIndex, kind: task.kind, screenshotPath };
       }),
       config.riskyConcurrency,
