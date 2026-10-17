@@ -182,15 +182,26 @@ function matchesEntry(incomingFileName: string, entry: PendingEntry): boolean {
   return incomingBase === expectedPrefix || incomingBase.startsWith(expectedPrefix);
 }
 
+/**
+ * Request HTTP tới Telegram có giới hạn thời gian chờ rõ ràng — không đặt giới hạn, 1 kết nối bị
+ * "treo" giữa chừng (vd bị 1 thiết bị mạng trung gian âm thầm cắt, đã xác nhận thực tế xảy ra với
+ * request long-poll giữ kết nối mở lâu) có thể khiến `fetch` của Node chờ RẤT LÂU (nhiều phút, tuỳ
+ * timeout TCP mặc định của hệ điều hành) mới chịu báo lỗi — trong lúc đó tool "mù" hoàn toàn,
+ * không nghe được tin nhắn mới nào. Giới hạn ngắn hơn giúp báo lỗi nhanh, thử lại sớm hơn nhiều.
+ */
+function fetchWithTimeout(url: string, timeoutMs: number, init?: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 async function downloadTelegramFile(fileId: string, saveAsName: string): Promise<void> {
   const token = config.telegramBotToken;
-  const fileInfoRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`);
+  const fileInfoRes = await fetchWithTimeout(`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`, 15_000);
   const fileInfo = (await fileInfoRes.json()) as { ok: boolean; result?: { file_path: string } };
   if (!fileInfo.ok || !fileInfo.result) {
     throw new Error(`Telegram getFile thất bại: ${JSON.stringify(fileInfo)}`);
   }
   const downloadUrl = `https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`;
-  const fileRes = await fetch(downloadUrl);
+  const fileRes = await fetchWithTimeout(downloadUrl, 30_000);
   if (!fileRes.ok) {
     throw new Error(`Tải file Telegram thất bại: HTTP ${fileRes.status}`);
   }
@@ -216,7 +227,9 @@ function normalizeUsername(username: string): string {
 async function pollOnce(): Promise<void> {
   const token = config.telegramBotToken;
   const url = `https://api.telegram.org/bot${token}/getUpdates?timeout=${POLL_TIMEOUT_SECONDS}&offset=${updateOffset}`;
-  const res = await fetch(url);
+  // Telegram giữ kết nối mở tới ${POLL_TIMEOUT_SECONDS}s (long-poll) — timeout phía mình phải DÀI
+  // HƠN mức đó 1 khoảng đủ rộng, không thì tự cắt kết nối trước khi Telegram kịp trả lời bình thường.
+  const res = await fetchWithTimeout(url, (POLL_TIMEOUT_SECONDS + 15) * 1000);
   const data = (await res.json()) as { ok: boolean; result?: TelegramUpdate[]; description?: string };
   if (!data.ok || !data.result) {
     logger.warn('Telegram getUpdates trả về lỗi:', JSON.stringify(data));
@@ -292,7 +305,7 @@ export async function sendDocumentToTelegram(filePath: string, caption: string):
   form.append('chat_id', config.telegramChatId);
   form.append('caption', caption);
   form.append('document', new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: form });
+  const res = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendDocument`, 45_000, { method: 'POST', body: form });
   const data = (await res.json()) as { ok: boolean; description?: string };
   if (!data.ok) {
     throw new Error(`Telegram sendDocument thất bại: ${JSON.stringify(data)}`);
