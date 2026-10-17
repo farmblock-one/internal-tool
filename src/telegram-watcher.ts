@@ -84,8 +84,14 @@ interface TelegramUpdate {
   update_id: number;
   message?: {
     chat: { id: number };
+    from?: { username?: string };
     document?: { file_id: string; file_name?: string };
   };
+}
+
+// So username không phân biệt hoa/thường, tự bỏ dấu "@" nếu lỡ dán kèm trong .env.
+function normalizeUsername(username: string): string {
+  return username.replace(/^@/, '').toLowerCase();
 }
 
 async function pollOnce(): Promise<void> {
@@ -100,9 +106,21 @@ async function pollOnce(): Promise<void> {
 
   for (const update of data.result) {
     updateOffset = update.update_id + 1;
-    const doc = update.message?.document;
-    const chatId = update.message?.chat.id;
+    const message = update.message;
+    const doc = message?.document;
+    const chatId = message?.chat.id;
     if (!doc?.file_name || String(chatId) !== config.telegramChatId) continue;
+
+    // Group có nhiều người, nhiều tin nhắn — PHẢI kiểm tra đúng người gửi là bot meetscript.io,
+    // không chỉ dựa vào tên file khớp (ai gửi đúng tên file trùng ngẫu nhiên cũng sẽ bị nhận nhầm
+    // nếu không kiểm tra người gửi). Nếu chưa cấu hình username thì vẫn chạy nhưng không an toàn —
+    // đã cảnh báo rõ lúc khởi động.
+    if (config.telegramResultBotUsername) {
+      const senderUsername = message?.from?.username;
+      if (!senderUsername || normalizeUsername(senderUsername) !== normalizeUsername(config.telegramResultBotUsername)) {
+        continue;
+      }
+    }
 
     const matchIndex = pending.findIndex((entry) => matchesEntry(doc.file_name!, entry));
     if (matchIndex === -1) continue;
@@ -151,6 +169,14 @@ export function startTelegramWatcher(): void {
   started = true;
   loadPending();
   logger.info(`Bắt đầu theo dõi kết quả Telegram (đang có ${pending.length} mục chờ từ trước, nếu có).`);
+  if (config.telegramResultBotUsername) {
+    logger.info(`Chỉ nhận file từ đúng người gửi: @${normalizeUsername(config.telegramResultBotUsername)}.`);
+  } else {
+    logger.warn(
+      'CHƯA cấu hình TELEGRAM_RESULT_BOT_USERNAME — sẽ nhận file từ BẤT KỲ AI trong group gửi đúng ' +
+        'tên file khớp, không kiểm tra người gửi. Nên đặt biến này sớm để tránh nhận nhầm file.',
+    );
+  }
 
   void (async () => {
     for (;;) {

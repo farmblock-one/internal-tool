@@ -31,4 +31,8 @@ export const config = {
   // phải có để web UI còn lại hoạt động bình thường).
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID ?? '',
+  // Username (không cần dấu "@") của bot meetscript.io trong group — dùng để kiểm tra ĐÚNG người
+  // gửi, không chỉ dựa vào tên file khớp (group có nhiều người, cần tránh nhận nhầm file của ai
+  // đó gửi trùng tên). Để trống vẫn chạy được nhưng KHÔNG an toàn — xem cảnh báo lúc khởi động.
+  telegramResultBotUsername: process.env.TELEGRAM_RESULT_BOT_USERNAME ?? '',
 };
