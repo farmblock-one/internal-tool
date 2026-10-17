@@ -5,7 +5,7 @@ import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
 import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
 import { openPersistentChrome } from './browser.js';
-import { startTelegramWatcher, getTelegramWatchStatus, getJobTelegramStatus } from './telegram-watcher.js'; // getJobTelegramStatus also carries mergeStatus/mergeError
+import { startTelegramWatcher, getTelegramWatchStatus, getJobTelegramStatus, dismissPendingEntry } from './telegram-watcher.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -324,8 +324,14 @@ function renderTelegramBanner(): string {
          <ul>
            ${status.overdue
              .map(
-               (e) =>
-                 `<li>${escapeHtml(path.basename(e.excelPath))} (${e.kind}) — đã chờ ${Math.round((Date.now() - e.registeredAt) / 60_000)} phút</li>`,
+               (e) => `<li>
+                 ${escapeHtml(path.basename(e.excelPath))} (${e.kind}) — đã chờ ${Math.round((Date.now() - e.registeredAt) / 60_000)} phút
+                 <form method="POST" action="/telegram-pending/dismiss" style="display:inline" onsubmit="return confirm('Bỏ theo dõi file này? Dùng khi đã tự tải tay trong group Telegram rồi.')">
+                   <input type="hidden" name="excelPath" value="${escapeHtml(e.excelPath)}" />
+                   <input type="hidden" name="kind" value="${escapeHtml(e.kind)}" />
+                   <button type="submit" style="margin-left:6px;padding:2px 8px;font-size:0.76rem;font-weight:600;background:#fff;color:#a85b00;border:1px solid #a85b00;border-radius:6px;cursor:pointer">Bỏ qua</button>
+                 </form>
+               </li>`,
              )
              .join('')}
          </ul>`
@@ -615,6 +621,19 @@ const server = http.createServer((req, res) => {
       }
       const job = enqueueMainJob(listUrl, outputFileName);
       res.writeHead(303, { Location: `/jobs/${job.id}` });
+      res.end();
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/telegram-pending/dismiss') {
+      const body = await readRequestBody(req);
+      const params = new URLSearchParams(body);
+      const excelPath = params.get('excelPath') ?? '';
+      const kind = params.get('kind');
+      if (excelPath && (kind === 'TEAM' || kind === 'GOOGLE')) {
+        dismissPendingEntry(excelPath, kind);
+      }
+      res.writeHead(303, { Location: '/' });
       res.end();
       return;
     }

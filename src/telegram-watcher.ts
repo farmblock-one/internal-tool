@@ -143,6 +143,22 @@ function mergePendingFromDisk(): void {
 }
 
 /**
+ * Bỏ theo dõi THỦ CÔNG 1 mục đang chờ — dùng khi team đã tự tải file kết quả tay trong group
+ * Telegram (vd file đó đến TRƯỚC KHI job được đăng ký theo dõi, nên tool không tự bắt được — xem
+ * giải thích "Telegram chỉ trả về tin nhắn mới" ở các lần trước), không muốn banner cảnh báo "chờ
+ * quá lâu" cứ hiện mãi trên trang chủ. Trả về `true` nếu tìm thấy và đã bỏ, `false` nếu không còn
+ * trong danh sách chờ nữa (vd vừa được tool tự nhận được đúng lúc).
+ */
+export function dismissPendingEntry(excelPath: string, kind: ResultKind): boolean {
+  const idx = pending.findIndex((e) => e.excelPath === excelPath && e.kind === kind);
+  if (idx === -1) return false;
+  pending.splice(idx, 1);
+  savePending();
+  logger.info(`Đã bỏ theo dõi thủ công (team tự xác nhận đã có file): ${kind} cho ${path.basename(excelPath)}.`);
+  return true;
+}
+
+/**
  * Gọi ngay sau khi upload lên meetscript.io thành công (tab TEAM hoặc GOOGLE) — ghi vào "sổ chờ"
  * (lưu trên đĩa, sống sót qua restart) để bộ phận theo dõi Telegram (chạy nền, độc lập hoàn toàn
  * với hàng đợi Chrome) biết cần đợi đúng file kết quả nào.
