@@ -46,13 +46,13 @@ async function clickButtonByTooltip(
   tooltipPattern: RegExp,
   maxCandidates = 20,
 ): Promise<boolean> {
-  // Không đoán class/role của tooltip nữa (class của Apollo bị mã hoá ngẫu nhiên, không đoán
-  // được) — thay vào đó, hover xong kiểm tra xem CHỮ đó có hiện ra GẦN vị trí nút vừa hover
-  // không (tooltip luôn hiện sát cạnh nút) — tránh nhầm với menu/dropdown/dialog ở xa mà tình
-  // cờ cũng chứa chữ khớp (đã từng bị nhầm sang menu "Add records to list").
-  const textCandidates = page.getByText(tooltipPattern);
-  const PROXIMITY_PX = 120;
-
+  // ⚠️ ĐÃ ĐỔI cách nhận diện: trước đây đo khoảng cách pixel giữa nút và chữ tooltip gần nhất
+  // (ngưỡng 120px) — nhưng các icon trong thanh công cụ này xếp sát nhau (cách nhau chỉ vài chục
+  // px), nên ngưỡng 120px quá rộng, dễ bắt nhầm tooltip của icon KẾ BÊN (thực tế đã xảy ra: bắt
+  // nhầm "Add to list" khi tìm "Export"). Giờ dùng `aria-describedby` — thuộc tính ARIA Apollo tự
+  // gắn vào ĐÚNG nút đang hover, trỏ chính xác tới ID của phần tử chứa chữ tooltip của NÓ (không
+  // phải đoán khoảng cách), đáng tin cậy tuyệt đối vì đây là liên kết lập trình, không phải suy
+  // luận hình học.
   const all = scope.locator('button, [role="button"]');
   const count = Math.min(await all.count(), maxCandidates);
   for (let i = 0; i < count; i++) {
@@ -74,25 +74,24 @@ async function clickButtonByTooltip(
     await btn.hover().catch(() => {});
     await page.waitForTimeout(400);
 
-    const btnBox = await btn.boundingBox().catch(() => null);
-    let matchedNearby = false;
-    if (btnBox) {
-      const textCount = Math.min(await textCandidates.count(), 5);
-      for (let j = 0; j < textCount; j++) {
-        const textEl = textCandidates.nth(j);
-        if (!(await textEl.isVisible().catch(() => false))) continue;
-        const textBox = await textEl.boundingBox().catch(() => null);
-        if (!textBox) continue;
-        const dx = Math.abs(textBox.x + textBox.width / 2 - (btnBox.x + btnBox.width / 2));
-        const dy = Math.abs(textBox.y + textBox.height / 2 - (btnBox.y + btnBox.height / 2));
-        if (dx < PROXIMITY_PX && dy < PROXIMITY_PX) {
-          matchedNearby = true;
+    // `aria-describedby` có thể chứa nhiều ID cách nhau bằng dấu cách — đọc TOÀN BỘ chữ của mọi
+    // phần tử được trỏ tới, khớp bất kỳ cái nào với `tooltipPattern` thì coi là đúng nút.
+    const describedBy = await btn.getAttribute('aria-describedby').catch(() => null);
+    let matchedTooltip = false;
+    if (describedBy) {
+      for (const id of describedBy.split(/\s+/).filter(Boolean)) {
+        // Dùng locator theo thuộc tính id= (không phải CSS `#id`) vì id Apollo có thể chứa dấu
+        // hai chấm (vd ":r2oq:") — ký tự đặc biệt trong CSS selector, dễ vỡ nếu dùng `#${id}`.
+        const tooltipEl = page.locator(`[id="${id}"]`).first();
+        const tooltipText = (await tooltipEl.textContent().catch(() => null))?.trim();
+        if (tooltipText && tooltipPattern.test(tooltipText)) {
+          matchedTooltip = true;
           break;
         }
       }
     }
     await page.mouse.move(0, 0).catch(() => {}); // rời chuột để tooltip ẩn đi trước khi thử nút kế
-    if (matchedNearby) {
+    if (matchedTooltip) {
       // Phòng khi lỡ match nhầm 1 nút tưởng bấm được nhưng thực ra không (vd vừa bị khoá lại ngay
       // sau lúc kiểm tra ở trên) — giới hạn timeout ngắn (5s thay vì mặc định 30s) và bắt lỗi, thử
       // tiếp nút tiếp theo thay vì để cả hàm treo/chết theo 1 lần đoán sai.
