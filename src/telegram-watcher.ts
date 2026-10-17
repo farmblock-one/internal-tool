@@ -1,8 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import dns from 'node:dns';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { mergeRiskyResultsIntoMaster, type MergeFileRef } from './risky-merge.js';
+
+// ⚠️ Đã xác nhận thực tế trên VM: fetch tới api.telegram.org thỉnh thoảng thất bại ngay lúc MỞ
+// KẾT NỐI (AggregateError ETIMEDOUT từ node:net internalConnectMultiple) — Node mặc định thử
+// song song cả IPv4 lẫn IPv6 ("Happy Eyeballs"), và đường IPv6 trên VM này có vẻ không ổn định/bị
+// treo, kéo cả lượt thử thất bại dù IPv4 vẫn dùng được bình thường (curl mặc định ưu tiên IPv4
+// nên không gặp vấn đề này). Ép toàn bộ tiến trình ưu tiên IPv4 trước để tránh phải chờ/phụ thuộc
+// vào đường IPv6 có vấn đề — áp dụng cho MỌI kết nối mạng ra ngoài của tiến trình, không chỉ
+// Telegram, nên đặt ở đây (module luôn được nạp sớm, dùng chung bởi server.ts/merge-risky.ts/...).
+dns.setDefaultResultOrder('ipv4first');
 
 const RESULTS_DIR = path.resolve('data/processed/telegram-results');
 const PENDING_FILE = path.resolve('data/processed/telegram-pending.json');
