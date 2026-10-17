@@ -281,16 +281,12 @@ async function pollOnce(): Promise<void> {
 }
 
 /**
- * Khi đã nhận ĐỦ số kết quả mong đợi (2 × số phần đã tách) cho 1 job — tự động ghép ngược lại
- * vào file Excel gốc (xem `mergeRiskyResultsIntoMaster`). Chỉ chạy đúng 1 lần cho mỗi job
- * (`mergeStatus` đổi từ 'pending' ngay khi bắt đầu chạy, dù thành công hay lỗi).
- */
-/**
  * Gửi 1 file lên ĐÚNG group Telegram đang theo dõi (cùng chat, cùng bot token dùng để nghe tin
  * nhắn) — dùng sendDocument của Telegram Bot API. Bot cần đã có sẵn trong group đó (chính là bot
  * đang dùng để nghe kết quả meetscript.io) và có quyền gửi tin nhắn/file bình thường trong group.
+ * Export để `merge-risky.ts` (lệnh ghép TAY) cũng gửi lại được, nhất quán với luồng tự động.
  */
-async function sendDocumentToTelegram(filePath: string, caption: string): Promise<void> {
+export async function sendDocumentToTelegram(filePath: string, caption: string): Promise<void> {
   const token = config.telegramBotToken;
   const form = new FormData();
   form.append('chat_id', config.telegramChatId);
@@ -303,6 +299,11 @@ async function sendDocumentToTelegram(filePath: string, caption: string): Promis
   }
 }
 
+/**
+ * Khi đã nhận ĐỦ số kết quả mong đợi (2 × số phần đã tách) cho 1 job — tự động ghép ngược lại
+ * vào file Excel gốc (xem `mergeRiskyResultsIntoMaster`). Chỉ chạy đúng 1 lần cho mỗi job
+ * (`mergeStatus` đổi từ 'pending' ngay khi bắt đầu chạy, dù thành công hay lỗi).
+ */
 async function maybeMergeJob(jobId: string): Promise<void> {
   const meta = jobMeta.get(jobId);
   if (!meta || meta.mergeStatus !== 'pending') return;
