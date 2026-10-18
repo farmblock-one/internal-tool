@@ -5,14 +5,7 @@ import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
 import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
 import { openPersistentChrome } from './browser.js';
-import {
-  startTelegramWatcher,
-  getTelegramWatchStatus,
-  getJobTelegramStatus,
-  dismissPendingEntry,
-  processIncomingUpdate,
-  verifyWebhookSecret,
-} from './telegram-watcher.js';
+import { startTelegramWatcher, getTelegramWatchStatus, getJobTelegramStatus, dismissPendingEntry } from './telegram-watcher.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -589,39 +582,6 @@ function readRequestBody(req: http.IncomingMessage): Promise<string> {
 const server = http.createServer((req, res) => {
   void (async () => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-
-    // Webhook Telegram xác thực RIÊNG qua secret token (header do Telegram tự gửi kèm), KHÔNG qua
-    // mật khẩu web UI (Telegram không gửi kèm Basic Auth) — phải xử lý TRƯỚC requireAuth, không
-    // thì mọi request webhook sẽ bị chặn ở đó (401) trước khi tới được route này.
-    if (req.method === 'POST' && url.pathname === '/telegram/webhook') {
-      // Log ngay khi có request gọi vào route này — kể cả khi bị từ chối — để còn biết Telegram
-      // CÓ gọi vào hay không khi chẩn đoán sau này (trước đây nhánh từ chối không log gì, khiến
-      // không phân biệt được "Telegram không gọi vào" với "có gọi nhưng bị từ chối trong âm thầm").
-      logger.info(`Nhận request vào /telegram/webhook từ IP ${req.socket.remoteAddress ?? '?'}.`);
-      const secretHeader = req.headers['x-telegram-bot-api-secret-token'];
-      const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
-      if (!verifyWebhookSecret(secret)) {
-        logger.warn('Từ chối request /telegram/webhook: secret token không khớp (có thể service đã bị khởi động lại, sinh secret mới, sau khi webhook đã đăng ký với secret cũ).');
-        res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Invalid secret token.');
-        return;
-      }
-      const body = await readRequestBody(req);
-      let update: Parameters<typeof processIncomingUpdate>[0];
-      try {
-        update = JSON.parse(body);
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Invalid JSON.');
-        return;
-      }
-      // Trả lời Telegram 200 NGAY — Telegram mong đợi phản hồi nhanh, xử lý thật sự chạy nền sau
-      // đó, không để Telegram phải chờ (lỡ bước ghép/gửi lại Telegram bên trong mất vài chục giây).
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('OK');
-      void processIncomingUpdate(update).catch((err) => logger.error('Lỗi xử lý webhook Telegram:', err));
-      return;
-    }
 
     if (!requireAuth(req, res)) return;
 

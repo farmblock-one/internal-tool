@@ -1,15 +1,9 @@
 import 'dotenv/config';
-import crypto from 'node:crypto';
 
 function required(name: string, value: string | undefined): string {
   if (!value) throw new Error(`Thiếu biến môi trường ${name} trong file .env`);
   return value;
 }
-
-// Tự sinh 1 chuỗi bí mật ngẫu nhiên nếu chưa đặt TELEGRAM_WEBHOOK_SECRET trong .env — không bắt
-// buộc người dùng phải tự tạo, vẫn đủ an toàn vì webhook được đăng ký lại (kèm đúng secret mới)
-// mỗi lần service khởi động (xem registerWebhook trong telegram-watcher.ts).
-const generatedWebhookSecret = crypto.randomBytes(32).toString('hex');
 
 export const config = {
   chromeUserDataDir: process.env.CHROME_USER_DATA_DIR ?? './.chrome-profile',
@@ -55,15 +49,17 @@ export const config = {
   // Mặc định 90 phút theo mức tối đa đã xác nhận thực tế cho 1 file; có thể tăng nếu xử lý nhiều
   // file song song khiến backend meetscript.io trả kết quả chậm hơn bình thường.
   telegramResultWarnAfterMinutes: Number(process.env.TELEGRAM_RESULT_WARN_AFTER_MINUTES ?? '90'),
-  // URL CÔNG KHAI (https://.../telegram/webhook) để Telegram tự gửi tin nhắn mới tới — THAY cho
-  // cách cũ (tool tự hỏi Telegram liên tục, gọi là "long-poll"). Đã xác nhận thực tế: kết nối RA
-  // NGOÀI từ VM này tới Telegram hay bị lỗi mạng (ETIMEDOUT chập chờn), trong khi kết nối VÀO VM
-  // (vd mở web UI) luôn ổn định — webhook đảo ngược hướng kết nối (Telegram gọi vào mình, không
-  // phải mình gọi ra ngoài liên tục), né được đúng vấn đề đó. Để trống thì bộ phận theo dõi kết
-  // quả Telegram tự tắt hẳn (không tự rơi về cách poll cũ).
-  telegramWebhookPublicUrl: process.env.TELEGRAM_WEBHOOK_PUBLIC_URL ?? '',
-  // Chuỗi bí mật Telegram gửi kèm mỗi request webhook (header X-Telegram-Bot-Api-Secret-Token) —
-  // dùng để xác nhận đúng là Telegram gọi tới, không phải ai đó giả mạo gọi thẳng vào route này.
-  // Không đặt trong .env thì tự sinh ngẫu nhiên mỗi lần khởi động (xem `generatedWebhookSecret`).
-  telegramWebhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || generatedWebhookSecret,
+  // ⚠️ Đã xác nhận thực tế: Telegram KHÔNG BAO GIỜ gửi update cho bot của mình về các tin nhắn do
+  // MỘT BOT KHÁC gửi trong cùng group (giới hạn cố định của Bot API, không có cách bật lại qua cấu
+  // hình, không liên quan gì tới polling/webhook/mạng) — vì bot meetscript.io gửi kết quả CŨNG LÀ 1
+  // bot, nên bot "nghe" của mình (Bot API) không bao giờ thấy được. Phải dùng 1 TÀI KHOẢN NGƯỜI
+  // THẬT (qua giao thức MTProto, thư viện teleproto) để nghe group — tài khoản người thật thì thấy
+  // được tin nhắn của MỌI bot bình thường. Lấy TELEGRAM_API_ID/TELEGRAM_API_HASH tại
+  // https://my.telegram.org (mục "API development tools"), rồi chạy `npm run telegram:login` 1 lần
+  // để đăng nhập (nhập SĐT + mã OTP) và lấy TELEGRAM_USER_SESSION dán vào đây.
+  telegramApiId: Number(process.env.TELEGRAM_API_ID ?? '0'),
+  telegramApiHash: process.env.TELEGRAM_API_HASH ?? '',
+  // Phiên đăng nhập đã lưu (sinh ra bởi `npm run telegram:login`) — dùng lại để kết nối tự động,
+  // không cần đăng nhập/nhập OTP lại mỗi lần service khởi động.
+  telegramUserSession: process.env.TELEGRAM_USER_SESSION ?? '',
 };
