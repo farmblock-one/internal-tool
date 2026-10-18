@@ -32,7 +32,9 @@ export async function uploadToDrive(filePath: string, folderId: string): Promise
       parents: [folderId],
     },
     media: {
-      mimeType: 'text/csv',
+      // File cuối luôn là .xlsx (xem buildOutputXlsxPath) — trước đây để nhầm 'text/csv' do hàm
+      // này viết từ sớm, lúc đó còn tách ra file CSV riêng; giờ phải đúng mimetype Excel.
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       body: fs.createReadStream(filePath),
     },
     // Bắt buộc phải có để API cho phép thao tác trên file/folder nằm trong Shared Drive — thiếu
@@ -43,4 +45,18 @@ export async function uploadToDrive(filePath: string, folderId: string): Promise
 
   logger.info(`Đã upload lên Google Drive: ${res.data.webViewLink}`);
   return res.data.id as string;
+}
+
+/**
+ * Upload file Excel CUỐI CÙNG (đã ghép đủ kết quả Risky, cột RESULT đã là "Safe to Send"/"Do not
+ * Send") lên đúng folder Drive đã cấu hình — gọi ngay sau khi ghép xong (xem `maybeMergeJob` trong
+ * telegram-watcher.ts và merge-risky.ts). Tự bỏ qua (không làm gì, không throw) nếu chưa cấu hình
+ * GDRIVE_SAFE_TO_SEND_FOLDER_ID — tính năng này KHÔNG bắt buộc để phần còn lại hoạt động.
+ */
+export async function uploadFinalXlsxToDrive(filePath: string): Promise<void> {
+  if (!config.gdriveSafeToSendFolderId) {
+    logger.info('Chưa cấu hình GDRIVE_SAFE_TO_SEND_FOLDER_ID — bỏ qua bước upload file Excel cuối lên Google Drive.');
+    return;
+  }
+  await uploadToDrive(filePath, config.gdriveSafeToSendFolderId);
 }

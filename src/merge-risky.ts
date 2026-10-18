@@ -1,5 +1,6 @@
 import { mergeRiskyResultsIntoMaster } from './risky-merge.js';
 import { sendDocumentToTelegram } from './telegram-watcher.js';
+import { uploadFinalXlsxToDrive } from './drive.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
@@ -38,6 +39,12 @@ async function main() {
     }
   } else {
     logger.info('Chưa cấu hình TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID — bỏ qua bước gửi lại Telegram, tự tải file qua scp.');
+  }
+
+  try {
+    await uploadFinalXlsxToDrive(masterXlsxPath);
+  } catch (err) {
+    logger.error('Ghép tay thành công nhưng upload lên Google Drive thất bại:', err);
   }
 }
 

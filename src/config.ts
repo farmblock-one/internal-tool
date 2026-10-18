@@ -21,9 +21,9 @@ export const config = {
     return required('DEBOUNCE_API_KEY', process.env.DEBOUNCE_API_KEY);
   },
   googleServiceAccountKey: process.env.GOOGLE_SERVICE_ACCOUNT_KEY ?? './service-account.json',
-  get gdriveSafeToSendFolderId(): string {
-    return required('GDRIVE_SAFE_TO_SEND_FOLDER_ID', process.env.GDRIVE_SAFE_TO_SEND_FOLDER_ID);
-  },
+  // Để trống -> bước tự động upload file Excel cuối lên Google Drive tự tắt (không ảnh hưởng phần
+  // còn lại) — xem `uploadFinalXlsxToDrive` trong drive.ts.
+  gdriveSafeToSendFolderId: process.env.GDRIVE_SAFE_TO_SEND_FOLDER_ID ?? '',
   // IP/domain công khai của server này — dùng để tạo URL host tạm file CSV cho Debounce tải về.
   get publicHost(): string {
     return required('PUBLIC_HOST', process.env.PUBLIC_HOST);

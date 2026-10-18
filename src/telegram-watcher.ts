@@ -7,6 +7,7 @@ import { NewMessage, type NewMessageEvent } from 'teleproto/events';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { mergeRiskyResultsIntoMaster, type MergeFileRef } from './risky-merge.js';
+import { uploadFinalXlsxToDrive } from './drive.js';
 
 // ⚠️ Đã xác nhận thực tế trên VM: fetch tới api.telegram.org thỉnh thoảng thất bại ngay lúc MỞ
 // KẾT NỐI (AggregateError ETIMEDOUT từ node:net internalConnectMultiple) — Node mặc định thử
@@ -338,6 +339,14 @@ async function maybeMergeJob(jobId: string): Promise<void> {
       logger.info(`Đã gửi file Excel gốc (đã cập nhật) vào group Telegram: ${meta.masterXlsxPath}`);
     } catch (sendErr) {
       logger.error(`Ghép file thành công nhưng gửi lại vào Telegram thất bại (tải tay từ web UI thay thế):`, sendErr);
+    }
+
+    // Upload luôn file Excel cuối (đã có đủ Safe to Send/Do not Send) lên Google Drive — tự bỏ qua
+    // nếu chưa cấu hình GDRIVE_SAFE_TO_SEND_FOLDER_ID, không ảnh hưởng gì tới phần còn lại.
+    try {
+      await uploadFinalXlsxToDrive(meta.masterXlsxPath);
+    } catch (driveErr) {
+      logger.error(`Ghép file thành công nhưng upload lên Google Drive thất bại (tải tay từ web UI thay thế):`, driveErr);
     }
   } catch (err) {
     meta.mergeStatus = 'error';

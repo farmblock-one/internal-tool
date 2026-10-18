@@ -10,6 +10,7 @@
     "web": "tsx src/server.ts",
     "risky": "tsx src/process-risky.ts",
     "merge-risky": "tsx src/merge-risky.ts",
+    "upload-drive": "tsx src/upload-drive.ts",
     "apollo:login": "tsx src/login-apollo.ts",
     "risky:login": "tsx src/login-risky.ts",
     "telegram:login": "tsx src/telegram-login.ts"

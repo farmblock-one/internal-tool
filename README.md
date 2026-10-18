@@ -32,7 +32,7 @@ cp .env.example .env            # rồi điền các giá trị vào .env
 Điền `.env`:
 - `DEBOUNCE_API_KEY` — lấy tại app.debounce.io > Settings > API
 - `GOOGLE_SERVICE_ACCOUNT_KEY` — đường dẫn file JSON key (xem hướng dẫn trong `src/drive.ts`)
-- `GDRIVE_SAFE_TO_SEND_FOLDER_ID` — ID folder Drive đích (dùng ở 1 giai đoạn sau, chưa gọi tới trong luồng chính)
+- `GDRIVE_SAFE_TO_SEND_FOLDER_ID` — ID folder Drive đích; để trống thì bước tự động upload tự tắt. Có file sẵn muốn đẩy tay ngay thì dùng `npm run upload-drive -- <file.xlsx>`.
 - `WEBUI_PASSWORD` — mật khẩu cho web UI (`npm run web`, xem phần bên dưới) — nên đặt vì VM có IP công khai
 
 ## Đăng nhập Apollo lần đầu (bắt buộc, làm 1 lần)
