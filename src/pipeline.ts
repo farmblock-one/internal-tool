@@ -96,9 +96,9 @@ export async function runFromDebounceResult(
 ): Promise<FlowResult> {
   const debounceRows = readCsv(debounceResultPath);
 
-  // 4. TẠM DỪNG bước import ngược lại Apollo (theo yêu cầu) — sẽ làm ở 1 giai đoạn sau, với 1 file
-  // khác đã qua thêm vài bước xử lý nữa, không phải ngay tại đây. `importCsv` trong apollo.ts vẫn
-  // còn nguyên, chỉ là chưa gọi tới trong luồng tự động này.
+  // 4. Bước import ngược lại Apollo (importCsv trong apollo.ts) KHÔNG chạy ở đây — chạy ở 1 giai
+  // đoạn SAU, trên file Excel CUỐI (sau khi đã có đủ kết quả Risky thật, xem apollo-reimport.ts
+  // + maybeMergeJob trong telegram-watcher.ts), không phải trên file ngay sau Debounce này.
 
   // 5. Ghép file Debounce (chỉ có EMAIL/RESULT/REASON/STATUS CODE/ROLE/FREE/DOMAIN) trở lại với
   // file Apollo đầy đủ cột (Name, Title, Company...) theo đúng EMAIL — để file Excel cuối có ĐỦ

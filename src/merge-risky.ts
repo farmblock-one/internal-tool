@@ -1,6 +1,7 @@
 import { mergeRiskyResultsIntoMaster } from './risky-merge.js';
 import { sendDocumentToTelegram } from './telegram-watcher.js';
 import { uploadFinalXlsxToDrive } from './drive.js';
+import { runApolloReimport } from './apollo-reimport.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
@@ -45,6 +46,15 @@ async function main() {
     await uploadFinalXlsxToDrive(masterXlsxPath);
   } catch (err) {
     logger.error('Ghép tay thành công nhưng upload lên Google Drive thất bại:', err);
+  }
+
+  // ⚠️ Dùng CHUNG profile Chrome Apollo với job export — KHÔNG chạy lệnh này đồng thời lúc web UI
+  // (`npm run web`) đang có job Apollo export/import khác chạy (2 Chrome cùng 1 profile sẽ tranh
+  // khoá/crash nhau). Lệnh này không qua được hàng đợi của web UI vì chạy ở tiến trình riêng.
+  try {
+    await runApolloReimport(masterXlsxPath);
+  } catch (err) {
+    logger.error('Ghép tay thành công nhưng import lại Apollo thất bại:', err);
   }
 }
 

@@ -5,7 +5,14 @@ import path from 'node:path';
 import { runFlow, type FlowResult } from './pipeline.js';
 import { runRiskyFlow, type RiskyFlowResult } from './risky-pipeline.js';
 import { openPersistentChrome } from './browser.js';
-import { startTelegramWatcher, getTelegramWatchStatus, getJobTelegramStatus, dismissPendingEntry } from './telegram-watcher.js';
+import {
+  startTelegramWatcher,
+  getTelegramWatchStatus,
+  getJobTelegramStatus,
+  dismissPendingEntry,
+  setOnMergeComplete,
+} from './telegram-watcher.js';
+import { runApolloReimport } from './apollo-reimport.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
@@ -54,7 +61,20 @@ interface RiskyJob {
   result?: RiskyFlowResult | null;
 }
 
-type Job = MainJob | RiskyJob;
+interface ReimportJob {
+  kind: 'reimport';
+  id: string;
+  // File Excel gốc (đã ghép đủ kết quả Risky thật) sẽ bị rút gọn còn email + RESULT rồi import
+  // ngược lại Apollo — xem `apollo-reimport.ts`.
+  masterXlsxPath: string;
+  status: JobStatus;
+  logs: string[];
+  createdAt: number;
+  finishedAt?: number;
+  error?: string;
+}
+
+type Job = MainJob | RiskyJob | ReimportJob;
 
 const jobs = new Map<string, Job>();
 
@@ -81,6 +101,21 @@ function enqueueMainJob(listUrl: string, outputFileName: string): MainJob {
   return job;
 }
 
+/**
+ * Xếp job import ngược lại Apollo vào CHUNG hàng đợi `mainQueue` (không phải hàng đợi riêng) —
+ * BẮT BUỘC, vì job này dùng ĐÚNG profile Chrome Apollo (CHROME_USER_DATA_DIR) giống job export ở
+ * trên, 2 Chrome cùng 1 profile chạy song song sẽ tranh khoá/crash nhau. Gọi tự động ngay sau khi
+ * ghép xong kết quả Risky (xem `setOnMergeComplete` ở cuối file).
+ */
+function enqueueReimportJob(masterXlsxPath: string): ReimportJob {
+  const id = crypto.randomBytes(6).toString('hex');
+  const job: ReimportJob = { kind: 'reimport', id, masterXlsxPath, status: 'queued', logs: [], createdAt: Date.now() };
+  jobs.set(id, job);
+  mainQueue.push(id);
+  void processMainQueue();
+  return job;
+}
+
 function enqueueRiskyJob(riskyPath: string, masterXlsxPath: string, sourceLabel: string): RiskyJob {
   const id = crypto.randomBytes(6).toString('hex');
   const job: RiskyJob = {
@@ -99,8 +134,9 @@ function enqueueRiskyJob(riskyPath: string, masterXlsxPath: string, sourceLabel:
   return job;
 }
 
-// Chạy ĐÚNG 1 job Apollo/Debounce tại 1 thời điểm — dùng chung 1 Chrome profile Apollo đã đăng
-// nhập, chạy 2 job song song sẽ tranh nhau cùng 1 profile và làm nhau crash.
+// Chạy ĐÚNG 1 job tại 1 thời điểm trong hàng đợi này ('main' HOẶC 'reimport') — cả 2 loại đều dùng
+// chung 1 Chrome profile Apollo đã đăng nhập, chạy song song (kể cả khác loại với nhau) sẽ tranh
+// nhau cùng 1 profile và làm nhau crash.
 async function processMainQueue(): Promise<void> {
   if (mainProcessing) return;
   mainProcessing = true;
@@ -108,21 +144,25 @@ async function processMainQueue(): Promise<void> {
     while (mainQueue.length > 0) {
       const id = mainQueue.shift();
       const job = id ? jobs.get(id) : undefined;
-      if (!job || job.kind !== 'main') continue;
+      if (!job || (job.kind !== 'main' && job.kind !== 'reimport')) continue;
       job.status = 'running';
       await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
         try {
-          job.result = await runFlow(job.listUrl, job.outputFileName);
+          if (job.kind === 'main') {
+            job.result = await runFlow(job.listUrl, job.outputFileName);
+            // Tự động đẩy tiếp bước xử lý Risky (Teams/Gmail -> meetscript.io) vào hàng đợi RIÊNG —
+            // vẫn là 1 luồng liền mạch, không cần bấm nút nào thêm, nhưng không còn chặn job
+            // Apollo/Debounce tiếp theo của người khác nữa.
+            const riskyJob = enqueueRiskyJob(job.result.riskyPath, job.result.masterXlsxPath, job.outputFileName || job.id);
+            job.riskyJobId = riskyJob.id;
+          } else {
+            await runApolloReimport(job.masterXlsxPath);
+          }
           job.status = 'done';
-          // Tự động đẩy tiếp bước xử lý Risky (Teams/Gmail -> meetscript.io) vào hàng đợi RIÊNG —
-          // vẫn là 1 luồng liền mạch, không cần bấm nút nào thêm, nhưng không còn chặn job
-          // Apollo/Debounce tiếp theo của người khác nữa.
-          const riskyJob = enqueueRiskyJob(job.result.riskyPath, job.result.masterXlsxPath, job.outputFileName || job.id);
-          job.riskyJobId = riskyJob.id;
         } catch (err) {
           job.status = 'error';
           job.error = err instanceof Error ? err.message : String(err);
-          logger.error('Job Apollo/Debounce lỗi:', err);
+          logger.error(`Job ${job.kind === 'main' ? 'Apollo/Debounce' : 'import lại Apollo'} lỗi:`, err);
         } finally {
           job.finishedAt = Date.now();
         }
@@ -280,6 +320,7 @@ function pageLayout(title: string, body: string): string {
   .tag { padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; display: inline-block; }
   .tag-main { background: #e4f3fb; color: var(--nsc-dark); }
   .tag-risky { background: #fdeedd; color: #a85b00; }
+  .tag-reimport { background: #eef0fb; color: #4b3fae; }
   pre {
     background: #102330; color: #d9e8ef; padding: 14px; border-radius: 8px; overflow-x: auto;
     white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; max-height: 60vh; overflow-y: auto;
@@ -311,7 +352,21 @@ ${body}
 }
 
 function jobLabel(job: Job): string {
-  return job.kind === 'main' ? job.outputFileName || job.id : `Risky — ${job.sourceLabel}`;
+  if (job.kind === 'main') return job.outputFileName || job.id;
+  if (job.kind === 'reimport') return `Import lại Apollo — ${path.basename(job.masterXlsxPath)}`;
+  return `Risky — ${job.sourceLabel}`;
+}
+
+function jobTagClass(job: Job): string {
+  if (job.kind === 'main') return 'tag-main';
+  if (job.kind === 'reimport') return 'tag-reimport';
+  return 'tag-risky';
+}
+
+function jobTagLabel(job: Job): string {
+  if (job.kind === 'main') return 'Apollo';
+  if (job.kind === 'reimport') return 'Import lại';
+  return 'Risky';
 }
 
 function renderTelegramBanner(): string {
@@ -362,7 +417,7 @@ function renderHome(errorMessage?: string): string {
               .map(
                 (j) =>
                   `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> ` +
-                  `<span class="tag ${j.kind === 'main' ? 'tag-main' : 'tag-risky'}">${j.kind === 'main' ? 'Apollo' : 'Risky'}</span> — ` +
+                  `<span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span> — ` +
                   `<span class="status status-${j.status}">${j.status}</span>` +
                   `${isRiskyJob(j) && j.progress ? ` (${escapeHtml(j.progress)})` : ''} ` +
                   `(bắt đầu lúc ${new Date(j.createdAt).toLocaleString('vi-VN')})</li>`,
@@ -377,7 +432,7 @@ function renderHome(errorMessage?: string): string {
     .map(
       (j) => `<tr>
         <td><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a></td>
-        <td><span class="tag ${j.kind === 'main' ? 'tag-main' : 'tag-risky'}">${j.kind === 'main' ? 'Apollo' : 'Risky'}</span></td>
+        <td><span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span></td>
         <td><span class="status status-${j.status}">${j.status}</span>${isRiskyJob(j) && j.status === 'running' && j.progress ? ` ${escapeHtml(j.progress)}` : ''}</td>
         <td>${new Date(j.createdAt).toLocaleString('vi-VN')}</td>
       </tr>`,
@@ -553,8 +608,35 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
   return pageLayout(`Risky — ${job.sourceLabel} — ${BRAND_NAME}`, body);
 }
 
+function renderReimportJob(job: ReimportJob): string {
+  const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
+  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
+  const doneBlock =
+    job.status === 'done'
+      ? `<p style="margin-top:16px;color:#1a9d6c">✅ Đã import xong (chỉ cột email + RESULT) ngược lại Apollo.</p>`
+      : '';
+
+  const body = `
+${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
+<a class="nsc-back" href="/">&larr; Quay lại</a>
+<div class="nsc-card">
+  <p style="margin-top:0"><strong>Import lại Apollo — ${escapeHtml(path.basename(job.masterXlsxPath))}</strong> <span class="tag tag-reimport">Import lại</span></p>
+  <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
+  <p>Dùng chung hàng đợi/Chrome với job Apollo export — chạy ngay sau khi job Apollo đang chạy (nếu có) xong.</p>
+  ${doneBlock}
+  ${errorBlock}
+</div>
+
+<h2>Log</h2>
+<pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
+`;
+  return pageLayout(`Import lại Apollo — ${BRAND_NAME}`, body);
+}
+
 function renderJob(job: Job): string {
-  return job.kind === 'main' ? renderMainJob(job) : renderRiskyJob(job);
+  if (job.kind === 'main') return renderMainJob(job);
+  if (job.kind === 'reimport') return renderReimportJob(job);
+  return renderRiskyJob(job);
 }
 
 function serveDownload(res: http.ServerResponse, filePath: string): void {
@@ -696,6 +778,12 @@ const server = http.createServer((req, res) => {
 });
 
 fs.mkdirSync(PROCESSED_DIR, { recursive: true });
+
+// Ngay khi ghép xong kết quả Risky (telegram-watcher.ts, độc lập không cần Chrome) — xếp tiếp job
+// import ngược lại Apollo vào hàng đợi DÙNG CHUNG Chrome profile Apollo (xem enqueueReimportJob).
+setOnMergeComplete((masterXlsxPath) => {
+  enqueueReimportJob(masterXlsxPath);
+});
 
 // Chạy độc lập hoàn toàn với 2 hàng đợi Chrome — chỉ gọi API Telegram thuần, không cần Chrome,
 // không chặn/bị chặn bởi các job khác.

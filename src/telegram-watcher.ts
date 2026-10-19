@@ -102,6 +102,18 @@ export function registerRiskyJobMeta(jobId: string, masterXlsxPath: string, tota
   jobMeta.set(jobId, { masterXlsxPath, totalExpected, mergeStatus: 'pending' });
 }
 
+let onMergeCompleteHandler: ((masterXlsxPath: string) => void) | undefined;
+
+/**
+ * Đăng ký 1 callback gọi mỗi khi vừa ghép xong kết quả Risky vào 1 file Excel gốc (dù thành công
+ * hay không bước gửi lại Telegram/Drive — 2 việc đó độc lập). Dùng ở server.ts để tự xếp job
+ * import ngược lại Apollo vào hàng đợi dùng chung Chrome profile Apollo — KHÔNG gọi thẳng việc mở
+ * Chrome ở module này, vì module này không biết (và không nên biết) gì về hàng đợi/Chrome.
+ */
+export function setOnMergeComplete(handler: (masterXlsxPath: string) => void): void {
+  onMergeCompleteHandler = handler;
+}
+
 let pending: PendingEntry[] = [];
 // Chỉ lưu trong bộ nhớ (không cần ghi đĩa) — tương tự danh sách job trong server.ts, mất khi
 // restart server cũng không sao, vì bản thân job đó cũng không còn hiện trên web UI nữa.
@@ -348,6 +360,11 @@ async function maybeMergeJob(jobId: string): Promise<void> {
     } catch (driveErr) {
       logger.error(`Ghép file thành công nhưng upload lên Google Drive thất bại (tải tay từ web UI thay thế):`, driveErr);
     }
+
+    // Báo cho server.ts (nếu có đăng ký, xem `setOnMergeComplete`) để xếp job import ngược lại
+    // Apollo vào CHUNG hàng đợi với job Apollo export — bắt buộc phải qua hàng đợi vì 2 việc này
+    // dùng CHUNG 1 profile Chrome Apollo, chạy chồng lên nhau sẽ tranh khoá/crash nhau.
+    onMergeCompleteHandler?.(meta.masterXlsxPath);
   } catch (err) {
     meta.mergeStatus = 'error';
     meta.mergeError = err instanceof Error ? err.message : String(err);
