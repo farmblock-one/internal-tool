@@ -42,16 +42,34 @@ export async function verifyListViaApi(csvFilePath: string, outputDir: string): 
     }
     logger.info(`Đã upload lên Debounce, list_id=${listId}. Đang chờ xử lý...`);
 
-    // Poll trạng thái tới khi xử lý xong (tối đa 30 phút)
+    // Poll trạng thái tới khi xử lý xong (tối đa 2 tiếng — đã xác nhận thực tế có lúc Debounce xử
+    // lý chậm hơn hẳn mức thường thấy, mà vẫn chạy xong thật chứ không hề kẹt hẳn).
     let downloadLink = '';
     let lastStatus = '';
-    const deadline = Date.now() + 30 * 60_000;
+    const deadline = Date.now() + 2 * 60 * 60_000;
 
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 15_000));
       const statusUrl = `${BULK_STATUS_URL}?api=${encodeURIComponent(apiKey)}&list_id=${encodeURIComponent(listId)}`;
-      const statusRes = await fetch(statusUrl);
-      const statusJson = (await statusRes.json()) as DebounceStatusResponse;
+
+      // ⚠️ Đã xác nhận thực tế: thỉnh thoảng (hiếm) Debounce trả về response rỗng/không phải JSON
+      // hợp lệ ngay giữa chừng, dù job thật sự vẫn đang chạy bình thường — nếu không bắt lỗi RIÊNG
+      // cho từng lượt poll, 1 lần trục trặc thoáng qua như vậy sẽ làm crash LUÔN cả job (dù
+      // Debounce vẫn tiếp tục chạy thật ở phía họ, để lại 1 list "mồ côi" không ai theo dõi nữa).
+      // Coi lượt poll lỗi như 1 lượt "chưa có kết quả" bình thường — thử lại ở lượt kế tiếp, chỉ
+      // thật sự báo lỗi nếu hết hẳn 2 tiếng mà CHƯA LẦN NÀO đọc được "completed".
+      let statusJson: DebounceStatusResponse;
+      try {
+        const statusRes = await fetch(statusUrl);
+        if (!statusRes.ok) {
+          throw new Error(`HTTP ${statusRes.status} ${await statusRes.text()}`);
+        }
+        statusJson = (await statusRes.json()) as DebounceStatusResponse;
+      } catch (err) {
+        logger.warn(`Lượt poll trạng thái Debounce bị lỗi (bỏ qua, thử lại ở lượt kế tiếp): ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+
       lastStatus = statusJson.debounce?.status ?? '';
       const percentage = statusJson.debounce?.percentage ?? 0;
       logger.info(`Trạng thái Debounce: ${lastStatus} (${percentage}%)`);
@@ -64,7 +82,7 @@ export async function verifyListViaApi(csvFilePath: string, outputDir: string): 
 
     if (!downloadLink) {
       throw new Error(
-        `Debounce xử lý quá 30 phút hoặc chưa có download_link (trạng thái cuối: "${lastStatus}") — kiểm tra thủ công tại app.debounce.io.`,
+        `Debounce xử lý quá 2 tiếng hoặc chưa có download_link (trạng thái cuối: "${lastStatus}") — kiểm tra thủ công tại app.debounce.io.`,
       );
     }
 
