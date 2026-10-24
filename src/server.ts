@@ -16,7 +16,6 @@ import { runApolloReimport } from './apollo-reimport.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
-import { isValidOutputFileName } from './filename-utils.js';
 
 const PROCESSED_DIR = path.resolve('data/processed');
 const ASSETS_DIR = path.resolve('assets');
@@ -27,7 +26,10 @@ interface MainJob {
   kind: 'main';
   id: string;
   listUrl: string;
-  outputFileName: string;
+  // Không còn do người dùng tự nhập — tự lấy theo đúng tên list Apollo thật (dò được lúc export,
+  // xem sanitizeToFileName/pipeline.ts), nên CHƯA biết được cho tới khi job chạy xong bước export.
+  // undefined trong lúc job còn "queued"/"running".
+  outputFileName?: string;
   status: JobStatus;
   logs: string[];
   createdAt: number;
@@ -92,9 +94,9 @@ function isRiskyJob(job: Job): job is RiskyJob {
   return job.kind === 'risky';
 }
 
-function enqueueMainJob(listUrl: string, outputFileName: string): MainJob {
+function enqueueMainJob(listUrl: string): MainJob {
   const id = crypto.randomBytes(6).toString('hex');
-  const job: MainJob = { kind: 'main', id, listUrl, outputFileName, status: 'queued', logs: [], createdAt: Date.now() };
+  const job: MainJob = { kind: 'main', id, listUrl, status: 'queued', logs: [], createdAt: Date.now() };
   jobs.set(id, job);
   mainQueue.push(id);
   void processMainQueue();
@@ -149,11 +151,15 @@ async function processMainQueue(): Promise<void> {
       await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
         try {
           if (job.kind === 'main') {
-            job.result = await runFlow(job.listUrl, job.outputFileName);
+            job.result = await runFlow(job.listUrl);
+            // Tên file (và tên hiển thị trên web UI) giờ lấy từ chính tên file Excel thật đã tạo
+            // (tự đặt theo tên list Apollo — xem runFlow/sanitizeToFileName), không còn do người
+            // dùng tự gõ nữa, nên chỉ biết được SAU KHI export xong.
+            job.outputFileName = path.basename(job.result.masterXlsxPath, '.xlsx');
             // Tự động đẩy tiếp bước xử lý Risky (Teams/Gmail -> meetscript.io) vào hàng đợi RIÊNG —
             // vẫn là 1 luồng liền mạch, không cần bấm nút nào thêm, nhưng không còn chặn job
             // Apollo/Debounce tiếp theo của người khác nữa.
-            const riskyJob = enqueueRiskyJob(job.result.riskyPath, job.result.masterXlsxPath, job.outputFileName || job.id);
+            const riskyJob = enqueueRiskyJob(job.result.riskyPath, job.result.masterXlsxPath, job.outputFileName);
             job.riskyJobId = riskyJob.id;
           } else {
             await runApolloReimport(job.masterXlsxPath);
@@ -259,12 +265,21 @@ function pageLayout(title: string, body: string): string {
   :root {
     --nsc-light: #36c3dc;
     --nsc-dark: #0081bb;
+    --nsc-navy: #051b30;
     --nsc-gray-900: #1a1a1a;
     --nsc-gray-600: #5a6472;
     --nsc-gray-200: #e4e9ee;
     --nsc-gray-050: #f4f8fa;
   }
   * { box-sizing: border-box; }
+  @keyframes nsc-twinkle { from { opacity: 0.12; } to { opacity: 0.32; } }
+  @keyframes nsc-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes nsc-fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes nsc-pulse-dot { 0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); } 50% { opacity: 0.25; transform: translateY(-50%) scale(1.8); } }
+  @keyframes nsc-indeterminate { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; }
+  }
   body {
     font-family: 'Montserrat', -apple-system, Segoe UI, Roboto, sans-serif;
     margin: 0;
@@ -281,6 +296,58 @@ function pageLayout(title: string, body: string): string {
   .nsc-header img { height: 32px; width: auto; display: block; }
   .nsc-header h1 { font-size: 1.25rem; font-weight: 700; margin: 0; letter-spacing: 0.01em; }
   .nsc-main { max-width: 760px; margin: 0 auto; padding: 28px 20px 48px; }
+  .nsc-hero {
+    position: relative;
+    margin: -28px -20px 32px;
+    padding: 56px 24px 96px;
+    background: radial-gradient(ellipse 120% 80% at 50% 0%, var(--nsc-dark) 0%, var(--nsc-navy) 60%), linear-gradient(180deg, var(--nsc-navy) 0%, var(--nsc-dark) 55%, var(--nsc-light) 100%);
+    overflow: hidden;
+    text-align: center;
+    color: #fff;
+  }
+  .nsc-hero::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      radial-gradient(#fff 1px, transparent 1px),
+      radial-gradient(#fff 1px, transparent 1px);
+    background-size: 160px 160px, 230px 230px;
+    background-position: 10px 20px, 90px 130px;
+    opacity: 0.2;
+    animation: nsc-twinkle 5s ease-in-out infinite alternate;
+  }
+  .nsc-hero-badge {
+    position: relative; display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25);
+    padding: 6px 14px; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
+    margin-bottom: 20px; animation: nsc-rise 0.5s ease-out;
+  }
+  .nsc-hero h2.nsc-hero-title {
+    position: relative; font-size: clamp(1.7rem, 4.4vw, 2.5rem); font-weight: 700; line-height: 1.18;
+    margin: 0 0 12px; border: none; padding: 0; color: #fff;
+    animation: nsc-rise 0.6s ease-out 0.05s backwards;
+  }
+  .nsc-hero h2.nsc-hero-title em { font-style: italic; font-weight: 600; opacity: 0.92; }
+  .nsc-hero p.nsc-hero-sub {
+    position: relative; max-width: 480px; margin: 0 auto 32px; color: rgba(255,255,255,0.82);
+    font-size: 0.92rem; line-height: 1.5; animation: nsc-rise 0.6s ease-out 0.1s backwards;
+  }
+  .nsc-hero-form {
+    position: relative; max-width: 560px; margin: 0 auto; background: #fff; border-radius: 18px;
+    padding: 8px 8px 8px 20px; display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 24px 60px rgba(2, 20, 40, 0.45);
+    animation: nsc-rise 0.6s ease-out 0.15s backwards;
+  }
+  .nsc-hero-form input[type=url] {
+    flex: 1; min-width: 0; border: none; outline: none; box-shadow: none; margin: 0;
+    font-size: 0.95rem; padding: 14px 0; background: transparent; color: var(--nsc-gray-900);
+  }
+  .nsc-hero-form button {
+    margin: 0; width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .nsc-hero-form button:hover { transform: scale(1.06); }
+  .nsc-hero-hint { position: relative; margin: 14px 0 0; font-size: 0.78rem; color: rgba(255,255,255,0.65); animation: nsc-rise 0.6s ease-out 0.2s backwards; }
   h2 {
     font-size: 1.05rem;
     font-weight: 700;
@@ -307,16 +374,27 @@ function pageLayout(title: string, body: string): string {
   .nsc-card {
     background: #fff; border: 1px solid var(--nsc-gray-200); border-radius: 12px;
     padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    animation: nsc-fadein 0.35s ease-out;
   }
   table { border-collapse: collapse; width: 100%; margin-top: 4px; }
   th { background: var(--nsc-gray-050); color: var(--nsc-gray-600); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
   td, th { border-bottom: 1px solid var(--nsc-gray-200); padding: 10px 8px; text-align: left; font-size: 0.9rem; }
   tr:last-child td { border-bottom: none; }
-  .status { padding: 3px 10px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; color: #fff; display: inline-block; }
+  .status { padding: 3px 10px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; color: #fff; display: inline-block; position: relative; }
   .status-queued { background: #8a94a3; }
-  .status-running { background: #e3a008; }
+  .status-running { background: #e3a008; padding-left: 20px; }
+  .status-running::before {
+    content: ''; position: absolute; left: 8px; top: 50%; width: 5px; height: 5px; border-radius: 50%;
+    background: #fff; transform: translateY(-50%); animation: nsc-pulse-dot 1.1s ease-in-out infinite;
+  }
   .status-done { background: #1a9d6c; }
   .status-error { background: #d33a3a; }
+  .nsc-progress-bar { height: 3px; background: var(--nsc-gray-200); border-radius: 3px; overflow: hidden; margin-top: 14px; }
+  .nsc-progress-bar::after {
+    content: ''; display: block; height: 100%; width: 35%; border-radius: 3px;
+    background: linear-gradient(90deg, var(--nsc-light), var(--nsc-dark));
+    animation: nsc-indeterminate 1.3s ease-in-out infinite;
+  }
   .tag { padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; display: inline-block; }
   .tag-main { background: #e4f3fb; color: var(--nsc-dark); }
   .tag-risky { background: #fdeedd; color: #a85b00; }
@@ -441,31 +519,26 @@ function renderHome(errorMessage?: string): string {
 
   const telegramBanner = renderTelegramBanner();
   const refreshSeconds = activeJobs.length > 0 ? 5 : telegramBanner ? 15 : 0;
+  const hero = `
+<div class="nsc-hero">
+  <span class="nsc-hero-badge">⚡ Tự động hoá toàn bộ pipeline</span>
+  <h2 class="nsc-hero-title">Lọc &amp; xác minh leads,<br/><em>chạy hoàn toàn tự động</em></h2>
+  <p class="nsc-hero-sub">Dán link List Apollo — tool tự export, xác minh email qua Debounce, xử lý Risky qua Teams/Google, rồi tự cập nhật kết quả ngược lại.</p>
+  <form method="POST" action="/jobs" class="nsc-hero-form">
+    <input type="url" id="listUrl" name="listUrl" placeholder="Dán link List Apollo..." required />
+    <button type="submit" aria-label="Bắt đầu chạy">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+    </button>
+  </form>
+  <p class="nsc-hero-hint">Tên file output tự lấy theo đúng tên list Apollo — không cần nhập tay.</p>
+</div>
+`;
   const body = `
 ${refreshSeconds > 0 ? `<meta http-equiv="refresh" content="${refreshSeconds}" />` : ''}
+${hero}
 ${errorBanner}
 ${banner}
 ${telegramBanner}
-<div class="nsc-card">
-  <form method="POST" action="/jobs">
-    <label for="listUrl">Link List Apollo</label>
-    <input type="url" id="listUrl" name="listUrl" placeholder="https://app.apollo.io/#/lists/..." required />
-
-    <label for="outputFileName">Tên file output mong muốn</label>
-    <input
-      type="text" id="outputFileName" name="outputFileName" placeholder="VD: Leads_Thang10"
-      pattern="[A-Za-z0-9_]+"
-      title="Chỉ chữ cái (không dấu), số và dấu gạch dưới (_) — không dấu cách, không ký tự đặc biệt khác"
-      required
-    />
-    <p style="margin:6px 0 0;font-size:0.78rem;color:var(--nsc-gray-600)">
-      Chỉ dùng chữ cái (không dấu), số và dấu gạch dưới (_) — không dấu cách, không ký tự đặc biệt khác.
-    </p>
-
-    <button type="submit">Bắt đầu chạy</button>
-  </form>
-</div>
-
 <h2>Các lần chạy gần đây</h2>
 ${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên file</th><th>Loại</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
 `;
@@ -515,6 +588,7 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
   <p style="margin-top:0"><strong>${escapeHtml(job.outputFileName || job.id)}</strong> <span class="tag tag-main">Apollo</span></p>
   <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
   <p>List Apollo: ${escapeHtml(job.listUrl)}</p>
+  ${shouldAutoRefresh ? '<div class="nsc-progress-bar"></div>' : ''}
   ${resultBlock}
   ${errorBlock}
 </div>
@@ -596,6 +670,7 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
 <div class="nsc-card">
   <p style="margin-top:0"><strong>Risky — ${escapeHtml(job.sourceLabel)}</strong> <span class="tag tag-risky">Risky</span></p>
   <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
+  ${job.status === 'queued' || job.status === 'running' ? '<div class="nsc-progress-bar"></div>' : ''}
   ${progressBlock}
   ${resultBlock}
   ${telegramBlock}
@@ -623,6 +698,7 @@ ${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
   <p style="margin-top:0"><strong>Import lại Apollo — ${escapeHtml(path.basename(job.masterXlsxPath))}</strong> <span class="tag tag-reimport">Import lại</span></p>
   <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
   <p>Dùng chung hàng đợi/Chrome với job Apollo export — chạy ngay sau khi job Apollo đang chạy (nếu có) xong.</p>
+  ${shouldAutoRefresh ? '<div class="nsc-progress-bar"></div>' : ''}
   ${doneBlock}
   ${errorBlock}
 </div>
@@ -689,19 +765,14 @@ const server = http.createServer((req, res) => {
       const body = await readRequestBody(req);
       const params = new URLSearchParams(body);
       const listUrl = (params.get('listUrl') ?? '').trim();
-      const outputFileName = (params.get('outputFileName') ?? '').trim();
-      let errorMessage: string | undefined;
-      if (!listUrl || !outputFileName) {
-        errorMessage = 'Thiếu link List Apollo hoặc tên file output.';
-      } else if (!isValidOutputFileName(outputFileName)) {
-        errorMessage = 'Tên file output không hợp lệ — chỉ được dùng chữ cái (không dấu), số và dấu gạch dưới (_), không dấu cách/ký tự đặc biệt khác.';
-      }
-      if (errorMessage) {
-        res.writeHead(303, { Location: `/?error=${encodeURIComponent(errorMessage)}` });
+      // Tên file output không còn nhập tay nữa — tự lấy theo tên list Apollo thật lúc export (xem
+      // runFlow trong pipeline.ts), nên ở đây chỉ còn cần kiểm tra có link hay không.
+      if (!listUrl) {
+        res.writeHead(303, { Location: `/?error=${encodeURIComponent('Thiếu link List Apollo.')}` });
         res.end();
         return;
       }
-      const job = enqueueMainJob(listUrl, outputFileName);
+      const job = enqueueMainJob(listUrl);
       res.writeHead(303, { Location: `/jobs/${job.id}` });
       res.end();
       return;

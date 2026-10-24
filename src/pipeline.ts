@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
-import { exportListEmails } from './apollo.js';
+import { exportListEmails, type ExportListResult } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
 import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue, mergeByEmail } from './csv-utils.js';
 import { writeRowsAsXlsx } from './xlsx-utils.js';
-import { buildOutputXlsxPath } from './filename-utils.js';
+import { buildOutputXlsxPath, sanitizeToFileName } from './filename-utils.js';
 import { logger } from './logger.js';
 import { captureCrashDiagnostics } from './diagnostics.js';
 
@@ -28,7 +28,7 @@ export interface FlowResult {
  * không ổn định, không phải lúc nào cũng xảy ra). Thay vì để cả luồng dừng hẳn, thử lại từ đầu
  * bước export (mở context mới) tối đa `maxAttempts` lần trước khi thật sự báo lỗi.
  */
-async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts = 3): Promise<string> {
+async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts = 3): Promise<ExportListResult> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const context = await openPersistentChrome();
@@ -53,7 +53,16 @@ async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts
 
 export async function runFlow(apolloListUrl: string, outputFileName?: string): Promise<FlowResult> {
   // 1-2. Apollo: xoá filter, chọn tất cả, export email -> tải file CSV thô (tự thử lại nếu Chrome crash)
-  const rawExportPath = await exportWithRetry(apolloListUrl, DOWNLOAD_DIR);
+  const { filePath: rawExportPath, listName } = await exportWithRetry(apolloListUrl, DOWNLOAD_DIR);
+
+  // Không có tên do người dùng tự nhập (web UI giờ không còn ô này nữa) -> tự đặt tên file theo
+  // ĐÚNG tên list Apollo thật (đã dò được lúc export, xem `detectApolloListName` trong apollo.ts),
+  // chuyển qua dạng hợp lệ (bỏ dấu, thay dấu cách/ký tự đặc biệt bằng "_"). Không dò được tên list
+  // thì để trống — `buildOutputXlsxPath` tự rơi về đặt tên theo thời gian.
+  const effectiveOutputFileName = outputFileName?.trim() || (listName ? sanitizeToFileName(listName) : undefined);
+  if (!outputFileName && listName) {
+    logger.info(`Tự đặt tên file output theo tên list Apollo: "${listName}" -> "${effectiveOutputFileName}".`);
+  }
 
   // 2.5a. Trước khi gửi qua Debounce, bỏ hẳn các lead có "Email Status" = "Unavailable" hoặc
   // "Email no longer valid" — Apollo coi như các lead này không có email khả dụng, gửi qua
@@ -77,7 +86,7 @@ export async function runFlow(apolloListUrl: string, outputFileName?: string): P
   // Truyền thêm `cleanedExportPath` (file Apollo ĐẦY ĐỦ cột đã gửi lên Debounce) để bước sau ghép
   // lại đúng theo email — nếu không có file này (vd chạy lại qua `npm run resume` chỉ với file kết
   // quả Debounce), file Excel cuối sẽ chỉ có các cột Debounce trả về, không có cột Apollo gốc.
-  return runFromDebounceResult(debounceResultPath, rawExportPath, outputFileName, cleanedExportPath);
+  return runFromDebounceResult(debounceResultPath, rawExportPath, effectiveOutputFileName, cleanedExportPath);
 }
 
 /**

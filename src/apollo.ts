@@ -219,11 +219,18 @@ async function dumpDebugScreenshot(page: Page, downloadDir: string, label: strin
   }
 }
 
+export interface ExportListResult {
+  filePath: string;
+  // Tên hiển thị THẬT của list Apollo (chưa qua xử lý ký tự) — '' nếu không dò được, xem
+  // `detectApolloListName`. Dùng để tự đặt tên file output (xem `sanitizeToFileName`).
+  listName: string;
+}
+
 export async function exportListEmails(
   context: BrowserContext,
   listUrl: string,
   downloadDir: string,
-): Promise<string> {
+): Promise<ExportListResult> {
   const page = await context.newPage();
   try {
     return await exportListEmailsInner(page, listUrl, downloadDir);
@@ -233,10 +240,44 @@ export async function exportListEmails(
   }
 }
 
-async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: string): Promise<string> {
+/**
+ * Dò tên hiển thị của list Apollo đang mở — dùng để tự đặt tên file output theo đúng tên list,
+ * không bắt người dùng tự gõ tay tên file nữa. UI Apollo có thể đổi nên thử vài cách nhận diện,
+ * ghi log rõ RAW TEXT đọc được ở mỗi cách — nếu tên tự đặt ra không đúng tên list thật, xem log
+ * này để biết đang bắt nhầm phần tử nào, chỉnh lại selector cho đúng.
+ */
+async function detectApolloListName(page: Page): Promise<string> {
+  const candidates: { label: string; read: () => Promise<string | null> }[] = [
+    {
+      label: 'heading đầu tiên trên trang',
+      read: async () => {
+        const el = page.getByRole('heading').first();
+        if (!(await el.isVisible({ timeout: 5000 }).catch(() => false))) return null;
+        return el.innerText().catch(() => null);
+      },
+    },
+    { label: 'document.title', read: () => page.title().catch(() => null) },
+  ];
+
+  for (const candidate of candidates) {
+    const raw = (await candidate.read())?.trim();
+    if (!raw) continue;
+    logger.info(`Dò tên list Apollo qua "${candidate.label}": "${raw}"`);
+    // document.title (và đôi khi cả heading) có thể có kèm hậu tố chung kiểu "<Tên list> - Apollo"
+    // — bỏ hậu tố đó đi nếu có, chỉ giữ lại phần tên riêng của list.
+    const cleaned = raw.replace(/[\s|–-]+apollo(\.io)?\s*$/i, '').trim();
+    if (cleaned) return cleaned;
+  }
+  logger.warn('Không dò được tên list Apollo từ trang (đã thử heading + document.title) — sẽ tự đặt tên file theo thời gian thay thế.');
+  return '';
+}
+
+async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: string): Promise<ExportListResult> {
   logger.info(`Mở list Apollo: ${listUrl}`);
   await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
   await softWaitNetworkIdle(page);
+
+  const listName = await detectApolloListName(page);
 
   // Chờ bảng danh sách contact thực sự xuất hiện. Không rõ Apollo dùng <table> thật hay
   // <div> giả lập, nên thử vài kiểu selector phổ biến; nếu không cái nào khớp trong 30s,
@@ -400,7 +441,7 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   // Đã có file rồi — Chrome có crash ngay sau đó (không liên quan tới mình nữa) cũng không sao,
   // page.close() lỡ lỗi vì trang đã chết thì bỏ qua, không để làm hỏng kết quả đã tải được.
   await page.close().catch(() => {});
-  return filePath;
+  return { filePath, listName };
 }
 
 export async function importCsv(context: BrowserContext, filePath: string, downloadDir: string): Promise<void> {
