@@ -28,11 +28,16 @@ export function findColumn(rows: Row[], aliases: string[]): string {
   return found;
 }
 
-/** Giữ lại đúng 2 cột email + RESULT, dùng cho file import ngược lại Apollo. */
+/**
+ * Giữ lại đúng 2 cột email + RESULT, dùng cho file import ngược lại Apollo. Bỏ hẳn các dòng không
+ * có email (ô trống hoặc chỉ có khoảng trắng) — dòng đó Apollo không khớp được với contact nào.
+ */
 export function onlyEmailAndResult(rows: Row[]): Row[] {
   const emailCol = findColumn(rows, ['email']);
   const resultCol = findColumn(rows, ['result']);
-  return rows.map((r) => ({ email: r[emailCol], RESULT: r[resultCol] }));
+  return rows
+    .map((r) => ({ email: String(r[emailCol] ?? '').trim(), RESULT: String(r[resultCol] ?? '').trim() }))
+    .filter((r) => r.email !== '');
 }
 
 /** Lấy ra danh sách email (chỉ giá trị, không kèm cột nào khác) — dùng cho file Excel upload Risky. */
