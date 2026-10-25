@@ -325,6 +325,8 @@ dialog.confirm::backdrop { background: rgba(4, 24, 43, .45); backdrop-filter: bl
   .job-row { grid-template-columns: 1fr auto auto; gap: 10px; padding: 14px 14px; }
   .job-row .job-time { display: none; }
   .detail { padding: 22px 18px; }
+  .meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .meta-grid .meta:first-child { grid-column: 1 / -1; }
   .powered { gap: 12px; } .powered .rule { width: 28px; }
 }
 `;
