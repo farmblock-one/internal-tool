@@ -553,7 +553,7 @@ function renderStepper(steps: { label: string; state: StepState }[]): string {
 }
 
 function renderLog(job: Job): string {
-  return `<div class="section-head"><h2>Log</h2><span class="count">${job.logs.length} dòng</span></div>
+  return `<div class="section-head"><h2>Log</h2><span class="count" data-live="logcount">${job.logs.length} dòng</span></div>
 <div class="terminal">
   <div class="term-bar"><i></i><i></i><i></i><span>${escapeHtml(jobLabel(job))}</span><button type="button" data-copy-log>Copy</button></div>
   <pre data-live="log">${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>

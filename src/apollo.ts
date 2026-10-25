@@ -272,10 +272,41 @@ async function detectApolloListName(page: Page): Promise<string> {
   return '';
 }
 
+/** Lỗi riêng khi profile Chrome của tool không còn đăng nhập Apollo — thử lại cũng vô ích. */
+export class ApolloLoggedOutError extends Error {
+  constructor() {
+    super(
+      'Tài khoản Apollo của tool đã bị đăng xuất (trang Apollo đang hiện màn hình đăng nhập). ' +
+        'Cần đăng nhập lại 1 lần trên server: DISPLAY=:99 npm run apollo:login (xem README, mục "Đăng nhập Apollo lần đầu").',
+    );
+    this.name = 'ApolloLoggedOutError';
+  }
+}
+
+/**
+ * Kiểm tra trang Apollo vừa mở có đang ở màn hình đăng nhập không (phiên đăng nhập hết hạn, hoặc
+ * ai đó đăng xuất tài khoản ở nơi khác). Nếu có thì dừng ngay với thông báo rõ ràng, thay vì đi
+ * tiếp và báo lỗi khó hiểu kiểu "Không tìm thấy nút Export".
+ */
+async function assertApolloLoggedIn(page: Page): Promise<void> {
+  const onLoginUrl = /\/(login|sign[-_]?in)\b/i.test(page.url());
+  const passwordVisible = await page.locator('input[type="password"]').first().isVisible().catch(() => false);
+  const loginBtnVisible = await page
+    .getByRole('button', { name: /^\s*log\s*in\s*$/i })
+    .first()
+    .isVisible()
+    .catch(() => false);
+  if (onLoginUrl || passwordVisible || loginBtnVisible) {
+    logger.error(`Phát hiện màn hình đăng nhập Apollo (url: ${page.url()}).`);
+    throw new ApolloLoggedOutError();
+  }
+}
+
 async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: string): Promise<ExportListResult> {
   logger.info(`Mở list Apollo: ${listUrl}`);
   await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
   await softWaitNetworkIdle(page);
+  await assertApolloLoggedIn(page);
 
   const listName = await detectApolloListName(page);
 
@@ -585,6 +616,7 @@ async function importCsvInner(page: Page, filePath: string): Promise<void> {
   // Column Mappings -> Import.
   await page.goto(APOLLO_PEOPLE_URL, { waitUntil: 'domcontentloaded' });
   await softWaitNetworkIdle(page);
+  await assertApolloLoggedIn(page);
 
   const importNavBtn = page.getByRole('button', { name: /^import$/i }).first();
   await importNavBtn.waitFor({ state: 'visible', timeout: 15_000 });
