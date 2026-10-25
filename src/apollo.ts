@@ -486,18 +486,105 @@ async function ensureToggleOff(page: Page, labelPattern: RegExp, indexFallback: 
   logger.info(`Đã xác nhận toggle "${labelPattern}" đang TẮT.`);
 }
 
-async function importCsvInner(page: Page, filePath: string): Promise<void> {
-  // Không có URL trực tiếp tới trang import (đã thử /#/import — 404) — phải đi đúng đường:
-  // People -> nút "Import" (góc trên phải, mở dropdown) -> "CSV" -> trang "Import contacts /
-  // Import accounts" -> chọn file cho card "Import contacts" -> màn Column Mappings -> Import.
-  await page.goto('https://app.apollo.io/', { waitUntil: 'domcontentloaded' });
-  await softWaitNetworkIdle(page);
+const APOLLO_PEOPLE_URL = 'https://app.apollo.io/#/people';
 
-  const peopleLink = page.getByRole('link', { name: /^people$/i }).first();
-  if (await peopleLink.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await peopleLink.click();
-    await softWaitNetworkIdle(page);
+/**
+ * Trên màn "Column Mappings": tìm dòng của cột CSV `csvColumn` (vd "RESULT"), đọc trường Apollo
+ * đang được chọn cho nó. Nếu chưa phải `apolloField` (vd "DEBOUNCED") thì mở dropdown của dòng đó,
+ * chọn lại đúng trường, rồi đọc lại để xác nhận. Không xác nhận được thì DỪNG (ném lỗi), không bấm
+ * Import — tránh ghi kết quả vào nhầm trường trên Apollo.
+ *
+ * ⚠️ Viết theo cấu trúc phổ biến (mỗi dòng mapping = tên cột CSV + 1 dropdown chọn trường Apollo),
+ * chưa kiểm chứng trên DOM Apollo thật — nếu lỗi, xem ảnh debug + log "Dòng mapping ..." để chỉnh.
+ */
+async function ensureColumnMappedTo(page: Page, csvColumn: string, apolloField: string): Promise<void> {
+  const exact = (text: string) => new RegExp(`^\\s*${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+  const fieldRe = new RegExp(`\\b${apolloField}\\b`, 'i');
+
+  const marker = await findVisibleLocator(page.getByText(exact(csvColumn)), 10, page, 10_000);
+  if (!marker) {
+    throw new Error(`Không thấy cột "${csvColumn}" trên màn Column Mappings — dừng lại, không import.`);
   }
+
+  // Đi ngược lên các cấp cha tới khi gặp vùng chứa đúng 1 dropdown — đó là dòng mapping của cột này
+  // (đi tiếp lên sẽ gộp cả dòng khác, có nhiều dropdown).
+  const DROPDOWN = 'select, [role="combobox"], [aria-haspopup="listbox"]';
+  let row: Locator | null = null;
+  let scope = marker;
+  for (let level = 1; level <= 8; level++) {
+    scope = scope.locator('xpath=..');
+    const count = await scope.locator(DROPDOWN).count();
+    if (count >= 1) {
+      if (count === 1) row = scope;
+      break;
+    }
+  }
+  if (!row) {
+    throw new Error(`Không xác định được dòng mapping của cột "${csvColumn}" — dừng lại, không import.`);
+  }
+  const dropdown = row.locator(DROPDOWN).first();
+
+  const currentMapping = async (): Promise<string> => {
+    const tag = await dropdown.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+    if (tag === 'select') {
+      return dropdown.evaluate((el) => {
+        const sel = el as HTMLSelectElement;
+        return sel.options[sel.selectedIndex]?.text ?? '';
+      });
+    }
+    // Dropdown kiểu react-select: giá trị đang chọn hiển thị dạng chữ trong dòng, cạnh tên cột CSV.
+    const rowText = (await row!.innerText().catch(() => '')).replace(exact(csvColumn), '');
+    const value = (await dropdown.inputValue().catch(() => '')) || '';
+    return `${rowText} ${value}`.replace(/\s+/g, ' ').trim();
+  };
+
+  const before = await currentMapping();
+  logger.info(`Dòng mapping cột "${csvColumn}" đang là: "${before}"`);
+  if (fieldRe.test(before.replace(exact(csvColumn), ''))) {
+    logger.info(`Đã xác nhận cột "${csvColumn}" ánh xạ vào trường "${apolloField}".`);
+    return;
+  }
+
+  logger.warn(`Cột "${csvColumn}" chưa ánh xạ vào "${apolloField}" — chọn lại.`);
+  const tag = await dropdown.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+  if (tag === 'select') {
+    const labels = await dropdown.locator('option').allInnerTexts();
+    const label = labels.find((l) => fieldRe.test(l));
+    if (!label) throw new Error(`Dropdown của cột "${csvColumn}" không có lựa chọn "${apolloField}". Có: ${labels.join(', ')}`);
+    await dropdown.selectOption({ label });
+  } else {
+    await dropdown.click({ force: true });
+    // Ô tìm kiếm trong dropdown (nếu có) — gõ tên trường cho danh sách lọc gọn lại.
+    const search = page.locator('input:focus');
+    if (await search.count()) await search.fill(apolloField).catch(() => {});
+    const option = await findVisibleLocator(
+      page.getByRole('option', { name: fieldRe }).or(page.getByText(exact(apolloField))),
+      10,
+      page,
+      8_000,
+    );
+    if (!option) {
+      await page.keyboard.press('Escape').catch(() => {});
+      throw new Error(`Không tìm thấy lựa chọn "${apolloField}" trong dropdown của cột "${csvColumn}" — dừng lại, không import.`);
+    }
+    await option.click();
+  }
+  await page.waitForTimeout(500);
+
+  const after = await currentMapping();
+  if (!fieldRe.test(after.replace(exact(csvColumn), ''))) {
+    throw new Error(`Đã chọn lại nhưng cột "${csvColumn}" vẫn không ánh xạ vào "${apolloField}" (đang là "${after}") — dừng lại, không import.`);
+  }
+  logger.info(`Đã chọn lại: cột "${csvColumn}" giờ ánh xạ vào "${apolloField}".`);
+}
+
+async function importCsvInner(page: Page, filePath: string): Promise<void> {
+  // Không có URL trực tiếp tới trang import (đã thử /#/import — 404). Vào thẳng trang People
+  // (https://app.apollo.io/#/people) -> nút "Import" (góc trên phải, mở dropdown) -> "CSV" ->
+  // trang "Import contacts / Import accounts" -> chọn file cho card "Import contacts" -> màn
+  // Column Mappings -> Import.
+  await page.goto(APOLLO_PEOPLE_URL, { waitUntil: 'domcontentloaded' });
+  await softWaitNetworkIdle(page);
 
   const importNavBtn = page.getByRole('button', { name: /^import$/i }).first();
   await importNavBtn.waitFor({ state: 'visible', timeout: 15_000 });
@@ -524,6 +611,10 @@ async function importCsvInner(page: Page, filePath: string): Promise<void> {
   // phone dù đã verify sẵn qua Debounce rồi (theo đúng yêu cầu, đây là bước không được bỏ qua).
   await ensureToggleOff(page, /enrich emails/i, 0);
   await ensureToggleOff(page, /enrich phone numbers/i, 1);
+
+  // Cột RESULT phải đổ vào đúng trường "DEBOUNCED" của Apollo. Thường Apollo tự ánh xạ đúng,
+  // nhưng vẫn kiểm tra lại và tự chọn lại nếu bị lệch, để không import kết quả vào nhầm trường.
+  await ensureColumnMappedTo(page, 'RESULT', 'DEBOUNCED');
 
   const importSubmitBtn = page.getByRole('button', { name: /^import/i }).first();
   await importSubmitBtn.waitFor({ state: 'visible', timeout: 15_000 });
