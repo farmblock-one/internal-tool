@@ -138,8 +138,10 @@ Cách khuyến nghị là setup Caddy để có HTTPS thật (xem mục ngay dư
 - Nếu 1 list Risky bị tách thành nhiều phần (>1000 lead, giới hạn của meetscript.io), các phần
   được upload **song song** (tối đa `RISKY_CONCURRENCY` lượt cùng lúc, mặc định 5) thay vì lần
   lượt — trang trạng thái của job Risky hiển thị tiến trình kiểu "12/60 lượt" theo thời gian thực.
-- Danh sách job hiện chỉ lưu trong bộ nhớ — tắt/khởi động lại server sẽ mất lịch sử hiển thị trên
-  web (các file kết quả trên đĩa thì KHÔNG mất, vẫn nằm trong `data/processed/`).
+- Lịch sử job được lưu vào `data/processed/jobs-history.json` nên khởi động lại server **không
+  mất lịch sử** nữa. Job đang chạy dở lúc tắt server sẽ hiện trạng thái "Lỗi" (cần chạy lại).
+  Trên web có nút **Xoá lịch sử** (xoá mọi job đã xong/lỗi) và nút xoá từng job. Thao tác xoá
+  chỉ bỏ job khỏi danh sách, file kết quả trên đĩa vẫn giữ nguyên.
 
 ### HTTPS thật qua Caddy (khuyến nghị)
 

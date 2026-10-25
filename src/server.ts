@@ -16,6 +16,7 @@ import { runApolloReimport } from './apollo-reimport.js';
 import { jobContext } from './job-context.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
+import { BRAND_NAME, escapeHtml, pageLayout } from './web-layout.js';
 
 const PROCESSED_DIR = path.resolve('data/processed');
 const ASSETS_DIR = path.resolve('assets');
@@ -80,6 +81,73 @@ type Job = MainJob | RiskyJob | ReimportJob;
 
 const jobs = new Map<string, Job>();
 
+// ---------- Lưu lịch sử job xuống đĩa ----------
+// Trước đây danh sách job chỉ nằm trong bộ nhớ, restart server là mất hết lịch sử trên web. Giờ ghi
+// ra 1 file JSON (ghi gộp, tối đa ~1 lần/giây) và đọc lại khi khởi động. Job đang chạy dở lúc tắt
+// server được đánh dấu "Lỗi" vì tiến trình Chrome/upload của nó đã mất theo.
+const HISTORY_FILE = path.join(PROCESSED_DIR, 'jobs-history.json');
+const MAX_SAVED_LOG_LINES = 3000;
+let saveTimer: NodeJS.Timeout | undefined;
+
+function saveJobsNow(): void {
+  clearTimeout(saveTimer);
+  saveTimer = undefined;
+  try {
+    const data = [...jobs.values()].map((j) => ({ ...j, logs: j.logs.slice(-MAX_SAVED_LOG_LINES) }));
+    fs.mkdirSync(PROCESSED_DIR, { recursive: true });
+    const tmp = `${HISTORY_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, HISTORY_FILE);
+  } catch (err) {
+    logger.warn(`Không lưu được lịch sử job: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function scheduleSave(): void {
+  if (!saveTimer) saveTimer = setTimeout(saveJobsNow, 1000);
+}
+
+function loadJobs(): void {
+  if (!fs.existsSync(HISTORY_FILE)) return;
+  try {
+    const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')) as Job[];
+    for (const job of data) {
+      if (!job || typeof job.id !== 'string' || !Array.isArray(job.logs)) continue;
+      if (job.status === 'queued' || job.status === 'running') {
+        job.status = 'error';
+        job.error = 'Server đã khởi động lại khi job này đang chạy/đang chờ. Hãy chạy lại nếu cần.';
+        job.finishedAt = job.finishedAt ?? Date.now();
+      }
+      jobs.set(job.id, job);
+    }
+    logger.info(`Đã nạp ${jobs.size} job từ lịch sử: ${HISTORY_FILE}`);
+  } catch (err) {
+    logger.warn(`Không đọc được lịch sử job (${HISTORY_FILE}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Xoá 1 job khỏi lịch sử (chỉ job đã xong/lỗi — job đang chạy/chờ không được xoá). */
+function deleteJob(id: string): boolean {
+  const job = jobs.get(id);
+  if (!job || job.status === 'queued' || job.status === 'running') return false;
+  jobs.delete(id);
+  saveJobsNow();
+  return true;
+}
+
+/** Xoá toàn bộ job đã xong/lỗi khỏi lịch sử. File kết quả trên đĩa giữ nguyên. */
+function clearFinishedJobs(): number {
+  let removed = 0;
+  for (const [id, job] of jobs) {
+    if (job.status !== 'queued' && job.status !== 'running') {
+      jobs.delete(id);
+      removed++;
+    }
+  }
+  saveJobsNow();
+  return removed;
+}
+
 // 2 HÀNG ĐỢI RIÊNG BIỆT, chạy ĐỘC LẬP (mỗi hàng đợi 1 Chrome profile riêng — xem config.ts):
 //   - mainQueue: Apollo export -> Debounce verify, dùng profile Apollo (CHROME_USER_DATA_DIR).
 //   - riskyQueue: Teams/Gmail -> meetscript.io, dùng profile Risky (RISKY_CHROME_USER_DATA_DIR).
@@ -98,6 +166,7 @@ function enqueueMainJob(listUrl: string): MainJob {
   const id = crypto.randomBytes(6).toString('hex');
   const job: MainJob = { kind: 'main', id, listUrl, status: 'queued', logs: [], createdAt: Date.now() };
   jobs.set(id, job);
+  scheduleSave();
   mainQueue.push(id);
   void processMainQueue();
   return job;
@@ -113,6 +182,7 @@ function enqueueReimportJob(masterXlsxPath: string): ReimportJob {
   const id = crypto.randomBytes(6).toString('hex');
   const job: ReimportJob = { kind: 'reimport', id, masterXlsxPath, status: 'queued', logs: [], createdAt: Date.now() };
   jobs.set(id, job);
+  scheduleSave();
   mainQueue.push(id);
   void processMainQueue();
   return job;
@@ -131,6 +201,7 @@ function enqueueRiskyJob(riskyPath: string, masterXlsxPath: string, sourceLabel:
     createdAt: Date.now(),
   };
   jobs.set(id, job);
+  scheduleSave();
   riskyQueue.push(id);
   void processRiskyQueue();
   return job;
@@ -148,7 +219,8 @@ async function processMainQueue(): Promise<void> {
       const job = id ? jobs.get(id) : undefined;
       if (!job || (job.kind !== 'main' && job.kind !== 'reimport')) continue;
       job.status = 'running';
-      await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
+      scheduleSave();
+      await jobContext.run({ append: (line) => { job.logs.push(line); scheduleSave(); } }, async () => {
         try {
           if (job.kind === 'main') {
             job.result = await runFlow(job.listUrl);
@@ -171,6 +243,7 @@ async function processMainQueue(): Promise<void> {
           logger.error(`Job ${job.kind === 'main' ? 'Apollo/Debounce' : 'import lại Apollo'} lỗi:`, err);
         } finally {
           job.finishedAt = Date.now();
+          scheduleSave();
         }
       });
     }
@@ -191,7 +264,8 @@ async function processRiskyQueue(): Promise<void> {
       const job = id ? jobs.get(id) : undefined;
       if (!job || job.kind !== 'risky') continue;
       job.status = 'running';
-      await jobContext.run({ append: (line) => job.logs.push(line) }, async () => {
+      scheduleSave();
+      await jobContext.run({ append: (line) => { job.logs.push(line); scheduleSave(); } }, async () => {
         let context: Awaited<ReturnType<typeof openPersistentChrome>> | undefined;
         try {
           context = await openPersistentChrome(config.riskyChromeUserDataDir);
@@ -200,6 +274,7 @@ async function processRiskyQueue(): Promise<void> {
             context,
             (done, total) => {
               job.progress = `${done}/${total}`;
+              scheduleSave();
             },
             job.id,
             job.masterXlsxPath,
@@ -212,21 +287,13 @@ async function processRiskyQueue(): Promise<void> {
         } finally {
           await context?.close().catch(() => {});
           job.finishedAt = Date.now();
+          scheduleSave();
         }
       });
     }
   } finally {
     riskyProcessing = false;
   }
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 function isAuthorized(req: http.IncomingMessage): boolean {
@@ -248,189 +315,47 @@ function requireAuth(req: http.IncomingMessage, res: http.ServerResponse): boole
   return false;
 }
 
-const BRAND_NAME = 'Tool lọc leads tự động';
+const TZ = 'Asia/Ho_Chi_Minh';
 
-function pageLayout(title: string, body: string): string {
-  return `<!doctype html>
-<html lang="vi">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${escapeHtml(title)}</title>
-<link rel="icon" type="image/png" href="/assets/nsc-favicon.png" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<style>
-  :root {
-    --nsc-light: #36c3dc;
-    --nsc-dark: #0081bb;
-    --nsc-navy: #051b30;
-    --nsc-gray-900: #1a1a1a;
-    --nsc-gray-600: #5a6472;
-    --nsc-gray-200: #e4e9ee;
-    --nsc-gray-050: #f4f8fa;
-  }
-  * { box-sizing: border-box; }
-  @keyframes nsc-twinkle { from { opacity: 0.12; } to { opacity: 0.32; } }
-  @keyframes nsc-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes nsc-fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes nsc-pulse-dot { 0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); } 50% { opacity: 0.25; transform: translateY(-50%) scale(1.8); } }
-  @keyframes nsc-indeterminate { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; }
-  }
-  body {
-    font-family: 'Montserrat', -apple-system, Segoe UI, Roboto, sans-serif;
-    margin: 0;
-    padding: 0;
-    color: var(--nsc-gray-900);
-    background: var(--nsc-gray-050);
-  }
-  .nsc-header {
-    background: linear-gradient(135deg, var(--nsc-dark) 0%, var(--nsc-light) 55%, var(--nsc-dark) 100%);
-    padding: 28px 20px;
-    color: #fff;
-  }
-  .nsc-header-inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-  .nsc-header img { height: 32px; width: auto; display: block; }
-  .nsc-header h1 { font-size: 1.25rem; font-weight: 700; margin: 0; letter-spacing: 0.01em; }
-  .nsc-main { max-width: 760px; margin: 0 auto; padding: 28px 20px 48px; }
-  .nsc-hero {
-    position: relative;
-    margin: -28px -20px 32px;
-    padding: 56px 24px 96px;
-    background: radial-gradient(ellipse 120% 80% at 50% 0%, var(--nsc-dark) 0%, var(--nsc-navy) 60%), linear-gradient(180deg, var(--nsc-navy) 0%, var(--nsc-dark) 55%, var(--nsc-light) 100%);
-    overflow: hidden;
-    text-align: center;
-    color: #fff;
-  }
-  .nsc-hero::before {
-    content: ''; position: absolute; inset: 0; pointer-events: none;
-    background-image:
-      radial-gradient(#fff 1px, transparent 1px),
-      radial-gradient(#fff 1px, transparent 1px);
-    background-size: 160px 160px, 230px 230px;
-    background-position: 10px 20px, 90px 130px;
-    opacity: 0.2;
-    animation: nsc-twinkle 5s ease-in-out infinite alternate;
-  }
-  .nsc-hero-badge {
-    position: relative; display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25);
-    padding: 6px 14px; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
-    margin-bottom: 20px; animation: nsc-rise 0.5s ease-out;
-  }
-  .nsc-hero h2.nsc-hero-title {
-    position: relative; font-size: clamp(1.7rem, 4.4vw, 2.5rem); font-weight: 700; line-height: 1.18;
-    margin: 0 0 12px; border: none; padding: 0; color: #fff;
-    animation: nsc-rise 0.6s ease-out 0.05s backwards;
-  }
-  .nsc-hero h2.nsc-hero-title em { font-style: italic; font-weight: 600; opacity: 0.92; }
-  .nsc-hero p.nsc-hero-sub {
-    position: relative; max-width: 480px; margin: 0 auto 32px; color: rgba(255,255,255,0.82);
-    font-size: 0.92rem; line-height: 1.5; animation: nsc-rise 0.6s ease-out 0.1s backwards;
-  }
-  .nsc-hero-form {
-    position: relative; max-width: 560px; margin: 0 auto; background: #fff; border-radius: 18px;
-    padding: 8px 8px 8px 20px; display: flex; align-items: center; gap: 10px;
-    box-shadow: 0 24px 60px rgba(2, 20, 40, 0.45);
-    animation: nsc-rise 0.6s ease-out 0.15s backwards;
-  }
-  .nsc-hero-form input[type=url] {
-    flex: 1; min-width: 0; border: none; outline: none; box-shadow: none; margin: 0;
-    font-size: 0.95rem; padding: 14px 0; background: transparent; color: var(--nsc-gray-900);
-  }
-  .nsc-hero-form button {
-    margin: 0; width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center; padding: 0;
-    transition: transform 0.15s ease, background 0.15s ease;
-  }
-  .nsc-hero-form button:hover { transform: scale(1.06); }
-  .nsc-hero-hint { position: relative; margin: 14px 0 0; font-size: 0.78rem; color: rgba(255,255,255,0.65); animation: nsc-rise 0.6s ease-out 0.2s backwards; }
-  h2 {
-    font-size: 1.05rem;
-    font-weight: 700;
-    color: var(--nsc-dark);
-    margin: 28px 0 10px;
-    padding-bottom: 8px;
-    border-bottom: 2px solid var(--nsc-light);
-  }
-  label { display: block; margin-top: 14px; font-weight: 600; font-size: 0.9rem; color: var(--nsc-gray-900); }
-  input[type=text], input[type=url] {
-    width: 100%; padding: 10px 12px; font-size: 1rem; font-family: inherit;
-    box-sizing: border-box; margin-top: 6px; border: 1.5px solid var(--nsc-gray-200);
-    border-radius: 8px; background: #fff; color: var(--nsc-gray-900);
-  }
-  input[type=text]:focus, input[type=url]:focus {
-    outline: none; border-color: var(--nsc-light); box-shadow: 0 0 0 3px rgba(54,195,220,0.2);
-  }
-  button {
-    margin-top: 20px; padding: 11px 26px; font-size: 0.95rem; font-weight: 600; font-family: inherit;
-    cursor: pointer; color: #fff; background: var(--nsc-dark); border: none; border-radius: 8px;
-    transition: background 0.15s ease;
-  }
-  button:hover { background: var(--nsc-light); }
-  .nsc-card {
-    background: #fff; border: 1px solid var(--nsc-gray-200); border-radius: 12px;
-    padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-    animation: nsc-fadein 0.35s ease-out;
-  }
-  table { border-collapse: collapse; width: 100%; margin-top: 4px; }
-  th { background: var(--nsc-gray-050); color: var(--nsc-gray-600); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
-  td, th { border-bottom: 1px solid var(--nsc-gray-200); padding: 10px 8px; text-align: left; font-size: 0.9rem; }
-  tr:last-child td { border-bottom: none; }
-  .status { padding: 3px 10px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; color: #fff; display: inline-block; position: relative; }
-  .status-queued { background: #8a94a3; }
-  .status-running { background: #e3a008; padding-left: 20px; }
-  .status-running::before {
-    content: ''; position: absolute; left: 8px; top: 50%; width: 5px; height: 5px; border-radius: 50%;
-    background: #fff; transform: translateY(-50%); animation: nsc-pulse-dot 1.1s ease-in-out infinite;
-  }
-  .status-done { background: #1a9d6c; }
-  .status-error { background: #d33a3a; }
-  .nsc-progress-bar { height: 3px; background: var(--nsc-gray-200); border-radius: 3px; overflow: hidden; margin-top: 14px; }
-  .nsc-progress-bar::after {
-    content: ''; display: block; height: 100%; width: 35%; border-radius: 3px;
-    background: linear-gradient(90deg, var(--nsc-light), var(--nsc-dark));
-    animation: nsc-indeterminate 1.3s ease-in-out infinite;
-  }
-  .tag { padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; display: inline-block; }
-  .tag-main { background: #e4f3fb; color: var(--nsc-dark); }
-  .tag-risky { background: #fdeedd; color: #a85b00; }
-  .tag-reimport { background: #eef0fb; color: #4b3fae; }
-  pre {
-    background: #102330; color: #d9e8ef; padding: 14px; border-radius: 8px; overflow-x: auto;
-    white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; max-height: 60vh; overflow-y: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  a { color: var(--nsc-dark); font-weight: 600; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .nsc-banner {
-    background: #fff6e0; border: 1px solid #e3a008; padding: 14px 18px; border-radius: 10px; margin-bottom: 20px;
-  }
-  .nsc-banner ul { margin: 8px 0 0; padding-left: 20px; }
-  .nsc-banner p { margin: 8px 0 0; font-size: 0.88rem; color: var(--nsc-gray-600); }
-  .nsc-error { color: #d33a3a; background: #fdeeee; border: 1px solid #d33a3a; border-radius: 10px; padding: 12px 16px; }
-  .nsc-back { display: inline-block; margin-bottom: 16px; font-size: 0.88rem; }
-</style>
-</head>
-<body>
-<div class="nsc-header">
-  <div class="nsc-header-inner">
-    <img src="/assets/nsc-logo-white.png" alt="NSC Software" />
-    <h1>${BRAND_NAME}</h1>
-  </div>
-</div>
-<div class="nsc-main">
-${body}
-</div>
-</body>
-</html>`;
+function fmtTime(ts: number): string {
+  return new Date(ts).toLocaleString('vi-VN', { timeZone: TZ, hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
+function fmtDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return `${h} giờ ${m} phút`;
+  if (m > 0) return `${m} phút ${s % 60}s`;
+  return `${s}s`;
+}
+
+const STATUS_LABEL: Record<JobStatus, string> = {
+  queued: 'Đang chờ',
+  running: 'Đang chạy',
+  done: 'Hoàn tất',
+  error: 'Lỗi',
+};
+
+function statusChip(status: JobStatus, extra = ''): string {
+  return `<span class="chip chip-${status}"><i></i>${STATUS_LABEL[status]}${extra ? ` · ${escapeHtml(extra)}` : ''}</span>`;
+}
+
+const ICONS = {
+  apollo: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>',
+  verify: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>',
+  risky: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>',
+  sync: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>',
+  trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
+  download: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>',
+  back: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>',
+  arrowRight: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>',
+  mail: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>',
+  alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+};
+
 function jobLabel(job: Job): string {
-  if (job.kind === 'main') return job.outputFileName || job.id;
+  if (job.kind === 'main') return job.outputFileName || `List Apollo #${job.id}`;
   if (job.kind === 'reimport') return `Import lại Apollo — ${path.basename(job.masterXlsxPath)}`;
   return `Risky — ${job.sourceLabel}`;
 }
@@ -447,13 +372,23 @@ function jobTagLabel(job: Job): string {
   return 'Risky';
 }
 
+function jobIcon(job: Job): string {
+  if (job.kind === 'main') return `<span class="job-ico">${ICONS.apollo}</span>`;
+  if (job.kind === 'reimport') return `<span class="job-ico reimport">${ICONS.sync}</span>`;
+  return `<span class="job-ico risky">${ICONS.risky}</span>`;
+}
+
+function isActive(job: Job): boolean {
+  return job.status === 'queued' || job.status === 'running';
+}
+
 function renderTelegramBanner(): string {
   const status = getTelegramWatchStatus();
   if (status.pending.length === 0) return '';
 
   const overdueBlock =
     status.overdue.length > 0
-      ? `<p style="margin-top:10px;color:#a85b00"><strong>⚠️ ${status.overdue.length} file chờ quá lâu chưa thấy bot trả về</strong> (vẫn tiếp tục tự động chờ, nhưng nếu lâu quá nên vào group Telegram kiểm tra thủ công):</p>
+      ? `<p style="color:#a85b00"><strong>${status.overdue.length} file chờ quá lâu chưa thấy bot trả về</strong> (vẫn tiếp tục tự động chờ, nhưng nếu lâu quá nên vào group Telegram kiểm tra thủ công):</p>
          <ul>
            ${status.overdue
              .map(
@@ -462,7 +397,7 @@ function renderTelegramBanner(): string {
                  <form method="POST" action="/telegram-pending/dismiss" style="display:inline" onsubmit="return confirm('Bỏ theo dõi file này? Dùng khi đã tự tải tay trong group Telegram rồi.')">
                    <input type="hidden" name="excelPath" value="${escapeHtml(e.excelPath)}" />
                    <input type="hidden" name="kind" value="${escapeHtml(e.kind)}" />
-                   <button type="submit" style="margin-left:6px;padding:2px 8px;font-size:0.76rem;font-weight:600;background:#fff;color:#a85b00;border:1px solid #a85b00;border-radius:6px;cursor:pointer">Bỏ qua</button>
+                   <button type="submit" class="mini-btn">Bỏ qua</button>
                  </form>
                </li>`,
              )
@@ -470,84 +405,248 @@ function renderTelegramBanner(): string {
          </ul>`
       : '';
 
-  return `<div class="nsc-banner" style="background:#eef6fb;border-color:var(--nsc-light)">
-      <strong>📨 Đang chờ bot meetscript.io trả kết quả qua Telegram cho ${status.pending.length} file.</strong>
-      <p>Tự động tải về ngay khi bot gửi vào group — không cần làm gì thêm, chỉ cần chờ.</p>
-      ${overdueBlock}
+  return `<div class="banner banner-info">
+      <span class="b-ico" style="color:var(--nsc-dark)">${ICONS.mail}</span>
+      <div>
+        <strong>Đang chờ bot meetscript.io trả kết quả qua Telegram cho ${status.pending.length} file.</strong>
+        <p>Tool tự tải về ngay khi bot gửi vào group, bạn không cần làm gì thêm.</p>
+        ${overdueBlock}
+      </div>
+    </div>`;
+}
+
+function renderHistoryRow(j: Job): string {
+  const progress = isRiskyJob(j) && j.status === 'running' && j.progress ? `${j.progress} lượt` : '';
+  const del = isActive(j)
+    ? '<span style="width:32px"></span>'
+    : `<button class="icon-btn" type="button" title="Xoá khỏi lịch sử"
+         data-title="Xoá job này?" data-confirm="Job “${escapeHtml(jobLabel(j))}” sẽ bị xoá khỏi lịch sử. File kết quả trên server vẫn được giữ nguyên."
+         data-action="/jobs/${j.id}/delete">${ICONS.trash}</button>`;
+  return `<div class="job-row" data-kind="${j.kind}">
+      <a class="job-main" href="/jobs/${j.id}">
+        ${jobIcon(j)}
+        <span style="min-width:0">
+          <span class="job-name">${escapeHtml(jobLabel(j))}</span>
+          <span class="job-meta"><span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span>${j.finishedAt ? `<span>${fmtDuration(j.finishedAt - j.createdAt)}</span>` : ''}</span>
+        </span>
+      </a>
+      ${statusChip(j.status, progress)}
+      <span class="job-time">${fmtTime(j.createdAt)}</span>
+      ${del}
     </div>`;
 }
 
 function renderHome(errorMessage?: string): string {
   const allJobs = [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
-  // "running" tối đa 1 job/hàng đợi (mỗi hàng đợi chạy tuần tự), nhưng "queued" có thể nhiều người
-  // cùng bấm — liệt kê hết để ai mở trang cũng thấy ngay đang có bao nhiêu người xếp hàng trước.
-  const activeJobs = allJobs.filter((j) => j.status === 'queued' || j.status === 'running');
-  const recentJobs = allJobs.slice(0, 20);
+  const activeJobs = allJobs.filter(isActive);
+  const doneCount = allJobs.filter((j) => j.status === 'done').length;
+  const errorCount = allJobs.filter((j) => j.status === 'error').length;
+  const finishedCount = allJobs.length - activeJobs.length;
 
-  const errorBanner = errorMessage ? `<div class="nsc-error" style="margin-bottom:20px">${escapeHtml(errorMessage)}</div>` : '';
+  const errorBanner = errorMessage
+    ? `<div class="banner banner-err reveal"><span class="b-ico" style="color:var(--err)">${ICONS.alert}</span><div><strong>${escapeHtml(errorMessage)}</strong></div></div>`
+    : '';
 
-  const banner =
+  const activeBanner =
     activeJobs.length > 0
-      ? `<div class="nsc-banner">
-          <strong>⚠️ Đang có ${activeJobs.length} luồng đang chạy hoặc chờ chạy:</strong>
-          <ul>
-            ${activeJobs
-              .map(
-                (j) =>
-                  `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> ` +
-                  `<span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span> — ` +
-                  `<span class="status status-${j.status}">${j.status}</span>` +
-                  `${isRiskyJob(j) && j.progress ? ` (${escapeHtml(j.progress)})` : ''} ` +
-                  `(bắt đầu lúc ${new Date(j.createdAt).toLocaleString('vi-VN')})</li>`,
-              )
-              .join('')}
-          </ul>
-          <p>Mỗi loại luồng (Apollo/Debounce và Risky) chỉ chạy 1 job tại 1 thời điểm — nhưng 2 loại chạy ĐỒNG THỜI được với nhau (dùng 2 Chrome profile riêng), không cần đợi nhau.</p>
+      ? `<div class="banner banner-warn">
+          <span class="b-ico" style="color:#b57a00">${ICONS.sync}</span>
+          <div>
+            <strong>Đang có ${activeJobs.length} luồng chạy hoặc chờ chạy</strong>
+            <ul>
+              ${activeJobs
+                .map(
+                  (j) =>
+                    `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> <span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span> ${statusChip(j.status, isRiskyJob(j) && j.progress ? `${j.progress}` : '')}</li>`,
+                )
+                .join('')}
+            </ul>
+            <p>Mỗi hàng đợi (Apollo/Debounce và Risky) chạy 1 job một lúc, nhưng 2 hàng đợi chạy song song với nhau.</p>
+          </div>
         </div>`
       : '';
 
-  const rows = recentJobs
-    .map(
-      (j) => `<tr>
-        <td><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a></td>
-        <td><span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span></td>
-        <td><span class="status status-${j.status}">${j.status}</span>${isRiskyJob(j) && j.status === 'running' && j.progress ? ` ${escapeHtml(j.progress)}` : ''}</td>
-        <td>${new Date(j.createdAt).toLocaleString('vi-VN')}</td>
-      </tr>`,
-    )
-    .join('');
-
   const telegramBanner = renderTelegramBanner();
-  const refreshSeconds = activeJobs.length > 0 ? 5 : telegramBanner ? 15 : 0;
+  const refreshSeconds = activeJobs.length > 0 ? 4 : telegramBanner ? 15 : 0;
+
+  const flowStep = (icon: string, label: string) => `<div class="flow-step"><span class="flow-ico">${icon}</span><b>${label}</b></div>`;
+  const flowLine = '<svg class="flow-line" viewBox="0 0 48 2"><line x1="0" y1="1" x2="48" y2="1"/></svg>';
+
   const hero = `
-<div class="nsc-hero">
-  <span class="nsc-hero-badge">⚡ Tự động hoá toàn bộ pipeline</span>
-  <h2 class="nsc-hero-title">Lọc &amp; xác minh leads,<br/><em>chạy hoàn toàn tự động</em></h2>
-  <p class="nsc-hero-sub">Dán link List Apollo — tool tự export, xác minh email qua Debounce, xử lý Risky qua Teams/Google, rồi tự cập nhật kết quả ngược lại.</p>
-  <form method="POST" action="/jobs" class="nsc-hero-form">
-    <input type="url" id="listUrl" name="listUrl" placeholder="Dán link List Apollo..." required />
-    <button type="submit" aria-label="Bắt đầu chạy">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-    </button>
+<section class="hero">
+  <span class="hero-orb a"></span><span class="hero-orb b"></span>
+  <div class="hero-rings"><span></span><span></span><span></span><span></span><span></span></div>
+  <img class="hero-mark" src="/assets/nsc-logo-white.png" alt="" />
+  <span class="hero-badge reveal"><i></i>Tự động hoá toàn bộ pipeline</span>
+  <h1 class="reveal d1">Lọc &amp; xác minh leads,<br/><em>chạy hoàn toàn tự động</em></h1>
+  <p class="hero-sub reveal d2">Dán link List Apollo. Tool tự export, xác minh email qua Debounce, xử lý Risky qua Teams/Google rồi cập nhật kết quả ngược lại Apollo.</p>
+  <form method="POST" action="/jobs" class="hero-form reveal d3">
+    <div class="hero-form-inner">
+      <svg class="link" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+      <input type="url" name="listUrl" placeholder="https://app.apollo.io/#/lists/..." required autocomplete="off" />
+      <button type="submit" class="btn-go"><span class="lbl">Bắt đầu</span><span class="arrow">${ICONS.arrowRight}</span><span class="spinner"></span></button>
+    </div>
   </form>
-  <p class="nsc-hero-hint">Tên file output tự lấy theo đúng tên list Apollo — không cần nhập tay.</p>
-</div>
-`;
+  <p class="hero-hint reveal d4">Tên file output tự lấy theo tên list Apollo, không cần nhập tay.</p>
+  <div class="flow reveal d5">
+    ${flowStep(ICONS.apollo, 'Export Apollo')}${flowLine}
+    ${flowStep(ICONS.verify, 'Verify Debounce')}${flowLine}
+    ${flowStep(ICONS.risky, 'Xử lý Risky')}${flowLine}
+    ${flowStep(ICONS.sync, 'Cập nhật Apollo')}
+  </div>
+</section>`;
+
+  const stat = (cls: string, label: string, value: number) =>
+    `<div class="card stat ${cls}"><small>${label}</small><strong data-count="${value}">0</strong></div>`;
+
+  const history =
+    allJobs.length === 0
+      ? `<div class="empty">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>
+          <b>Chưa có lần chạy nào</b>
+          Dán link List Apollo ở trên để bắt đầu.
+        </div>`
+      : allJobs.map(renderHistoryRow).join('');
+
+  const clearBtn =
+    finishedCount > 0
+      ? `<button class="btn btn-danger" type="button" data-title="Xoá toàn bộ lịch sử?"
+           data-confirm="Xoá ${finishedCount} job đã chạy xong khỏi lịch sử. Job đang chạy/đang chờ vẫn giữ nguyên, file kết quả trên server không bị xoá."
+           data-action="/jobs/clear">${ICONS.trash} Xoá lịch sử</button>`
+      : '';
+
   const body = `
-${refreshSeconds > 0 ? `<meta http-equiv="refresh" content="${refreshSeconds}" />` : ''}
 ${hero}
 ${errorBanner}
-${banner}
-${telegramBanner}
-<h2>Các lần chạy gần đây</h2>
-${recentJobs.length === 0 ? '<p>Chưa có lần chạy nào.</p>' : `<div class="nsc-card"><table><tr><th>Tên file</th><th>Loại</th><th>Trạng thái</th><th>Bắt đầu lúc</th></tr>${rows}</table></div>`}
+<div data-live="banners">${activeBanner}${telegramBanner}</div>
+<div class="stats reveal d2" data-live="stats">
+  ${stat('', 'Tổng số job', allJobs.length)}
+  ${stat('run', 'Đang chạy / chờ', activeJobs.length)}
+  ${stat('ok', 'Hoàn tất', doneCount)}
+  ${stat('err', 'Lỗi', errorCount)}
+</div>
+<div class="section-head reveal d3">
+  <h2>Lịch sử chạy</h2>
+  <span class="spacer"></span>
+  <div class="tabs">
+    <button type="button" data-f="all" class="on">Tất cả</button>
+    <button type="button" data-f="main">Apollo</button>
+    <button type="button" data-f="risky">Risky</button>
+    <button type="button" data-f="reimport">Import lại</button>
+  </div>
+  <span data-live="clear">${clearBtn}</span>
+</div>
+<div class="card jobs reveal d4" data-live="history">${history}</div>
 `;
-  return pageLayout(BRAND_NAME, body);
+  return pageLayout(BRAND_NAME, body, refreshSeconds);
+}
+
+type StepState = 'done' | 'active' | 'pending' | 'failed';
+
+function renderStepper(steps: { label: string; state: StepState }[]): string {
+  return `<div class="stepper">${steps
+    .map(
+      (s, i) =>
+        `<div class="step ${s.state}"><span class="dot">${s.state === 'done' ? '✓' : s.state === 'failed' ? '!' : i + 1}</span><b>${s.label}</b></div>`,
+    )
+    .join('')}</div>`;
+}
+
+function renderLog(job: Job): string {
+  return `<div class="section-head"><h2>Log</h2><span class="count">${job.logs.length} dòng</span></div>
+<div class="terminal">
+  <div class="term-bar"><i></i><i></i><i></i><span>${escapeHtml(jobLabel(job))}</span><button type="button" data-copy-log>Copy</button></div>
+  <pre data-live="log">${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
+</div>`;
+}
+
+function renderMeta(items: [string, string][]): string {
+  return `<div class="meta-grid">${items
+    .map(([k, v]) => `<div class="meta"><small>${k}</small><span title="${escapeHtml(v)}">${escapeHtml(v)}</span></div>`)
+    .join('')}</div>`;
+}
+
+function timingMeta(job: Job): [string, string][] {
+  const items: [string, string][] = [['Bắt đầu', fmtTime(job.createdAt)]];
+  if (job.finishedAt) {
+    items.push(['Kết thúc', fmtTime(job.finishedAt)], ['Thời lượng', fmtDuration(job.finishedAt - job.createdAt)]);
+  } else if (job.status === 'running') {
+    items.push(['Đã chạy', fmtDuration(Date.now() - job.createdAt)]);
+  }
+  return items;
+}
+
+function detailHead(job: Job, extraChip = ''): string {
+  const del = isActive(job)
+    ? ''
+    : `<button class="btn btn-danger" type="button" data-title="Xoá job này?"
+         data-confirm="Job sẽ bị xoá khỏi lịch sử. File kết quả trên server vẫn được giữ nguyên."
+         data-action="/jobs/${job.id}/delete">${ICONS.trash} Xoá</button>`;
+  return `<div class="detail-head">
+    ${jobIcon(job)}
+    <div class="grow">
+      <h1>${escapeHtml(jobLabel(job))}</h1>
+      <div class="sub"><span class="tag ${jobTagClass(job)}">${jobTagLabel(job)}</span>${statusChip(job.status, extraChip)}</div>
+    </div>
+    ${del}
+  </div>`;
+}
+
+function errorBlockFor(job: Job): string {
+  return job.status === 'error'
+    ? `<div class="banner banner-err" style="margin:20px 0 0"><span class="b-ico" style="color:var(--err)">${ICONS.alert}</span><div><strong>Lỗi</strong><p style="color:inherit">${escapeHtml(job.error ?? '')}</p></div></div>`
+    : '';
+}
+
+function backLink(): string {
+  return `<a class="back reveal" href="/">${ICONS.back} Quay lại danh sách</a>`;
+}
+
+function mainJobSteps(job: MainJob): { label: string; state: StepState }[] {
+  const logText = job.logs.join('\n');
+  const riskyJob = job.riskyJobId ? jobs.get(job.riskyJobId) : undefined;
+  const risky = riskyJob && isRiskyJob(riskyJob) ? riskyJob : undefined;
+  const tg = risky ? getJobTelegramStatus(risky.id) : undefined;
+  const reimport = job.result
+    ? [...jobs.values()].find((j): j is ReimportJob => j.kind === 'reimport' && j.masterXlsxPath === job.result?.masterXlsxPath)
+    : undefined;
+
+  let mainIdx = 0; // bước 0-2 thuộc job này
+  if (job.status === 'done') mainIdx = 3;
+  else if (logText.includes('Đã lưu file gốc sau Debounce')) mainIdx = 2;
+  else if (logText.includes('Đã xoá cột Contact Owner')) mainIdx = 1;
+
+  const s = (i: number): StepState => {
+    if (i < mainIdx) return 'done';
+    if (i === mainIdx) return job.status === 'error' ? 'failed' : job.status === 'running' ? 'active' : 'pending';
+    return 'pending';
+  };
+  const riskyState: StepState = !risky ? 'pending' : risky.status === 'done' ? 'done' : risky.status === 'error' ? 'failed' : risky.status === 'running' ? 'active' : 'pending';
+  const expected = risky?.result ? risky.result.chunks.length * 2 : 0;
+  const tgState: StepState =
+    risky?.status === 'done' && risky.result === null
+      ? 'done'
+      : tg?.mergeStatus === 'done'
+        ? 'done'
+        : tg?.mergeStatus === 'error'
+          ? 'failed'
+          : expected > 0
+            ? 'active'
+            : 'pending';
+  const reState: StepState = !reimport ? 'pending' : reimport.status === 'done' ? 'done' : reimport.status === 'error' ? 'failed' : 'active';
+
+  return [
+    { label: 'Export Apollo', state: s(0) },
+    { label: 'Verify Debounce', state: s(1) },
+    { label: 'Excel & tách Risky', state: s(2) },
+    { label: 'Teams / Google', state: riskyState },
+    { label: 'Kết quả Telegram', state: tgState },
+    { label: 'Import lại Apollo', state: reState },
+  ];
 }
 
 function renderMainJob(job: MainJob): string {
-  const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
-  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
+  const active = isActive(job);
 
   let resultBlock = '';
   if (job.status === 'done' && job.result) {
@@ -559,154 +658,132 @@ function renderMainJob(job: MainJob): string {
         const mergeStatus = getJobTelegramStatus(riskyJob.id).mergeStatus;
         const mergeNote =
           mergeStatus === 'done'
-            ? ' — <span style="color:#1a9d6c">✅ đã tự động cập nhật cột RESULT trong file Excel ở trên</span>'
+            ? '<br/><span style="color:var(--ok)">Đã tự động cập nhật cột RESULT trong file Excel.</span>'
             : mergeStatus === 'error'
-              ? ' — <span style="color:#d33a3a">⚠️ lỗi khi tự động cập nhật, xem chi tiết ở trang Risky</span>'
+              ? '<br/><span style="color:var(--err)">Lỗi khi tự động cập nhật, xem chi tiết ở trang Risky.</span>'
               : '';
-        riskyLinkBlock = `
-          <p style="margin-top:16px">
-            Bước xử lý Risky (Teams/Gmail &rarr; meetscript.io):
-            <a href="/jobs/${riskyJob.id}">xem tiến trình</a> —
-            <span class="status status-${riskyJob.status}">${riskyJob.status}</span>
-            ${riskyJob.status === 'running' && riskyJob.progress ? ` (${escapeHtml(riskyJob.progress)})` : ''}${mergeNote}
-          </p>`;
+        riskyLinkBlock = `<p class="note">Bước xử lý Risky (Teams/Gmail → meetscript.io): ${statusChip(riskyJob.status, riskyJob.status === 'running' && riskyJob.progress ? riskyJob.progress : '')}
+            <a href="/jobs/${riskyJob.id}" style="margin-left:6px">Xem tiến trình →</a>${mergeNote}</p>`;
       }
     }
     resultBlock = `
-      <p>
-        <a href="/jobs/${job.id}/download/xlsx">Tải file Excel (${escapeHtml(path.basename(result.masterXlsxPath))})</a><br/>
-        <a href="/jobs/${job.id}/download/risky">Tải file Risky CSV (${escapeHtml(path.basename(result.riskyPath))})</a>
-      </p>
-      ${riskyLinkBlock}
-    `;
+      <div class="actions">
+        <a class="btn btn-primary" href="/jobs/${job.id}/download/xlsx">${ICONS.download} File Excel · ${escapeHtml(path.basename(result.masterXlsxPath))}</a>
+        <a class="btn" href="/jobs/${job.id}/download/risky">${ICONS.download} File Risky CSV</a>
+      </div>
+      ${riskyLinkBlock}`;
   }
 
-  const body = `
-${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
-<a class="nsc-back" href="/">&larr; Quay lại</a>
-<div class="nsc-card">
-  <p style="margin-top:0"><strong>${escapeHtml(job.outputFileName || job.id)}</strong> <span class="tag tag-main">Apollo</span></p>
-  <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
-  <p>List Apollo: ${escapeHtml(job.listUrl)}</p>
-  ${shouldAutoRefresh ? '<div class="nsc-progress-bar"></div>' : ''}
-  ${resultBlock}
-  ${errorBlock}
-</div>
+  const riskyJob = job.riskyJobId ? jobs.get(job.riskyJobId) : undefined;
+  const pipelineActive = active || (riskyJob ? isActive(riskyJob) : false);
 
-<h2>Log</h2>
-<pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
+  const body = `
+${backLink()}
+<div class="card detail reveal d1" data-live="detail">
+  ${detailHead(job)}
+  ${renderMeta([['List Apollo', job.listUrl], ...timingMeta(job)])}
+  ${renderStepper(mainJobSteps(job))}
+  ${active ? '<div class="progress"></div>' : ''}
+  ${resultBlock}
+  ${errorBlockFor(job)}
+</div>
+<div class="reveal d2">${renderLog(job)}</div>
 `;
-  return pageLayout(`${job.outputFileName || job.id} — ${BRAND_NAME}`, body);
+  return pageLayout(`${jobLabel(job)} — ${BRAND_NAME}`, body, active ? 3 : pipelineActive ? 8 : 0);
 }
 
 function renderRiskyJob(job: RiskyJob): string {
-  // Tổng số kết quả MONG ĐỢI từ Telegram = 2 (TEAM + GOOGLE) cho mỗi phần đã tách — chỉ biết được
-  // sau khi upload xong (job.result khác null/undefined). File Risky rỗng (result === null) thì
-  // không có gì để chờ Telegram cả.
+  // Tổng số kết quả MONG ĐỢI từ Telegram = 2 (TEAM + GOOGLE) cho mỗi phần đã tách.
   const telegramStatus = getJobTelegramStatus(job.id);
   const expectedTelegramTotal = job.result ? job.result.chunks.length * 2 : 0;
   const receivedCount = telegramStatus.received.length;
   const telegramAllReceived = expectedTelegramTotal > 0 && receivedCount >= expectedTelegramTotal;
 
-  // Vẫn tự refresh trang dù job đã "done" (upload xong) nếu CHƯA nhận đủ kết quả thật từ Telegram
-  // — 2 việc khác nhau: "done" chỉ nghĩa là đã upload xong lên meetscript.io, chưa chắc đã có kết
-  // quả thật (bot có thể mất tới 1-2 tiếng mới trả lời).
-  const shouldAutoRefresh = job.status === 'queued' || job.status === 'running' || (expectedTelegramTotal > 0 && !telegramAllReceived);
-  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
+  // Vẫn tự cập nhật khi job đã "done" (upload xong) nếu CHƯA nhận đủ kết quả thật từ Telegram.
+  const active = isActive(job);
+  const waitingTelegram = expectedTelegramTotal > 0 && !telegramAllReceived;
 
-  const progressBlock =
-    job.status === 'running' && job.progress
-      ? `<p>Tiến trình upload meetscript.io: <strong>${escapeHtml(job.progress)}</strong> lượt</p>`
-      : '';
+  let progressBlock = active ? '<div class="progress"></div>' : '';
+  if (job.status === 'running' && job.progress) {
+    const [done, total] = job.progress.split('/').map(Number);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    progressBlock = `<p class="note">Upload meetscript.io: <strong>${escapeHtml(job.progress)}</strong> lượt (${pct}%)</p>
+      <div class="progress det" style="margin-top:8px"><span class="bar" style="width:${pct}%"></span></div>`;
+  }
 
   let resultBlock = '';
   if (job.status === 'done') {
     if (job.result === null) {
-      resultBlock = `<p style="margin-top:16px">File Risky không có lead nào — không cần xử lý gì thêm.</p>`;
+      resultBlock = `<p class="note ok">File Risky không có lead nào, không cần xử lý thêm.</p>`;
     } else if (job.result) {
       const { chunks } = job.result;
       resultBlock = `
-        <div style="margin-top:16px">
-          <p><strong>Đã xử lý xong Risky${chunks.length > 1 ? ` (tách thành ${chunks.length} phần do vượt giới hạn 1000 lead/lần của meetscript.io, xử lý song song)` : ''} — kết quả thật (file Excel Team/Google) sẽ được bot Telegram gửi riêng.</strong></p>
-          ${chunks
-            .map(
-              (chunk, i) => `
-            <div style="margin-top:12px">
-              ${chunks.length > 1 ? `<p><strong>Phần ${i + 1}/${chunks.length}</strong> (${escapeHtml(path.basename(chunk.excelPath))}):</p>` : ''}
-              <p>Ảnh xác nhận upload tab TEAM:</p>
-              <img src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
-              <p style="margin-top:12px">Ảnh xác nhận upload tab GOOGLE:</p>
-              <img src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" style="max-width:100%;border:1px solid var(--nsc-gray-200);border-radius:8px;display:block" />
-            </div>`,
-            )
-            .join('')}
-        </div>`;
+        <p class="note"><strong>Đã upload xong Risky${chunks.length > 1 ? ` (${chunks.length} phần, chạy song song do giới hạn 1000 lead/lần của meetscript.io)` : ''}.</strong> Kết quả thật (file Excel Team/Google) sẽ do bot Telegram gửi về.</p>
+        ${chunks
+          .map(
+            (chunk, i) => `
+          ${chunks.length > 1 ? `<p class="note" style="margin-bottom:0"><strong>Phần ${i + 1}/${chunks.length}</strong> · ${escapeHtml(path.basename(chunk.excelPath))}</p>` : ''}
+          <div class="shots">
+            <div class="shot"><p>Xác nhận upload · TEAM</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" /></div>
+            <div class="shot"><p>Xác nhận upload · GOOGLE</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" /></div>
+          </div>`,
+          )
+          .join('')}`;
     }
   }
 
   let telegramBlock = '';
   if (expectedTelegramTotal > 0) {
-    telegramBlock = telegramAllReceived
-      ? `<p style="margin-top:16px;color:#1a9d6c"><strong>✅ Đã nhận đủ ${receivedCount}/${expectedTelegramTotal} kết quả thật từ Telegram.</strong></p>`
-      : `<p style="margin-top:16px"><strong>📨 Đã nhận ${receivedCount}/${expectedTelegramTotal} kết quả thật từ Telegram</strong> — đang tiếp tục chờ phần còn lại (bot meetscript.io có thể mất tới 1-2 tiếng).</p>`;
+    const pct = Math.round((Math.min(receivedCount, expectedTelegramTotal) / expectedTelegramTotal) * 100);
+    telegramBlock = `<p class="note${telegramAllReceived ? ' ok' : ''}"><strong>Kết quả Telegram: ${receivedCount}/${expectedTelegramTotal}</strong>${
+      telegramAllReceived ? ' · đã nhận đủ.' : ' · đang chờ phần còn lại (bot meetscript.io có thể mất 1-2 tiếng).'
+    }</p>
+    <div class="progress det" style="margin-top:8px"><span class="bar" style="width:${pct}%"></span></div>`;
     if (telegramStatus.received.length > 0) {
-      telegramBlock += `<ul style="margin-top:6px;font-size:0.88rem">${telegramStatus.received
-        .map(
-          (r) =>
-            `<li>${escapeHtml(r.fileName)} (${r.kind}) — lúc ${new Date(r.receivedAt).toLocaleString('vi-VN')}</li>`,
-        )
-        .join('')}</ul>`;
+      telegramBlock += `<div class="note"><ul>${telegramStatus.received
+        .map((r) => `<li>${escapeHtml(r.fileName)} (${r.kind}) · ${fmtTime(r.receivedAt)}</li>`)
+        .join('')}</ul></div>`;
     }
     if (telegramStatus.mergeStatus === 'done') {
-      telegramBlock += `<p style="margin-top:10px;color:#1a9d6c"><strong>✅ Đã tự động cập nhật cột RESULT (Safe to Send/Do not Send) ngay trong file Excel gốc</strong> — tải lại file ở trên để xem bản mới nhất.</p>`;
+      telegramBlock += `<p class="note ok"><strong>Đã tự động cập nhật cột RESULT (Safe to Send/Do not Send) trong file Excel gốc.</strong> Tải lại file ở trang job Apollo để xem bản mới nhất.</p>`;
     } else if (telegramStatus.mergeStatus === 'error') {
-      telegramBlock += `<div class="nsc-error" style="margin-top:10px"><strong>Lỗi khi tự động cập nhật file Excel gốc:</strong> ${escapeHtml(telegramStatus.mergeError ?? '')}<br/>(Cần tự ghép tay — các file kết quả Team/Google vẫn tải về bình thường, chỉ bước ghép tự động bị lỗi.)</div>`;
+      telegramBlock += `<div class="banner banner-err" style="margin-top:14px"><span class="b-ico" style="color:var(--err)">${ICONS.alert}</span><div><strong>Lỗi khi tự động cập nhật file Excel gốc</strong><p style="color:inherit">${escapeHtml(telegramStatus.mergeError ?? '')}<br/>Cần ghép tay. Các file kết quả Team/Google vẫn tải về bình thường.</p></div></div>`;
     }
   }
 
   const body = `
-${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
-<a class="nsc-back" href="/">&larr; Quay lại</a>
-<div class="nsc-card">
-  <p style="margin-top:0"><strong>Risky — ${escapeHtml(job.sourceLabel)}</strong> <span class="tag tag-risky">Risky</span></p>
-  <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
-  ${job.status === 'queued' || job.status === 'running' ? '<div class="nsc-progress-bar"></div>' : ''}
+${backLink()}
+<div class="card detail reveal d1" data-live="detail">
+  ${detailHead(job)}
+  ${renderMeta([['File nguồn', job.sourceLabel], ...timingMeta(job)])}
   ${progressBlock}
   ${resultBlock}
   ${telegramBlock}
-  ${errorBlock}
+  ${errorBlockFor(job)}
 </div>
-
-<h2>Log</h2>
-<pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
+<div class="reveal d2">${renderLog(job)}</div>
 `;
-  return pageLayout(`Risky — ${job.sourceLabel} — ${BRAND_NAME}`, body);
+  return pageLayout(`${jobLabel(job)} — ${BRAND_NAME}`, body, active ? 3 : waitingTelegram ? 10 : 0);
 }
 
 function renderReimportJob(job: ReimportJob): string {
-  const shouldAutoRefresh = job.status === 'queued' || job.status === 'running';
-  const errorBlock = job.status === 'error' ? `<div class="nsc-error"><strong>Lỗi:</strong> ${escapeHtml(job.error ?? '')}</div>` : '';
+  const active = isActive(job);
   const doneBlock =
-    job.status === 'done'
-      ? `<p style="margin-top:16px;color:#1a9d6c">✅ Đã import xong (chỉ cột email + RESULT) ngược lại Apollo.</p>`
-      : '';
+    job.status === 'done' ? `<p class="note ok"><strong>Đã import xong (cột email + RESULT) ngược lại Apollo.</strong></p>` : '';
 
   const body = `
-${shouldAutoRefresh ? '<meta http-equiv="refresh" content="4" />' : ''}
-<a class="nsc-back" href="/">&larr; Quay lại</a>
-<div class="nsc-card">
-  <p style="margin-top:0"><strong>Import lại Apollo — ${escapeHtml(path.basename(job.masterXlsxPath))}</strong> <span class="tag tag-reimport">Import lại</span></p>
-  <p>Trạng thái: <span class="status status-${job.status}">${job.status}</span></p>
-  <p>Dùng chung hàng đợi/Chrome với job Apollo export — chạy ngay sau khi job Apollo đang chạy (nếu có) xong.</p>
-  ${shouldAutoRefresh ? '<div class="nsc-progress-bar"></div>' : ''}
+${backLink()}
+<div class="card detail reveal d1" data-live="detail">
+  ${detailHead(job)}
+  ${renderMeta([['File Excel', path.basename(job.masterXlsxPath)], ...timingMeta(job)])}
+  <p class="note">Dùng chung hàng đợi và Chrome với job export Apollo, chạy ngay sau khi job Apollo đang chạy (nếu có) xong.</p>
+  ${active ? '<div class="progress"></div>' : ''}
   ${doneBlock}
-  ${errorBlock}
+  ${errorBlockFor(job)}
 </div>
-
-<h2>Log</h2>
-<pre>${escapeHtml(job.logs.join('\n') || '(chưa có log)')}</pre>
+<div class="reveal d2">${renderLog(job)}</div>
 `;
-  return pageLayout(`Import lại Apollo — ${BRAND_NAME}`, body);
+  return pageLayout(`Import lại Apollo — ${BRAND_NAME}`, body, active ? 3 : 0);
 }
 
 function renderJob(job: Job): string {
@@ -726,6 +803,11 @@ function serveDownload(res: http.ServerResponse, filePath: string): void {
     'Content-Disposition': `attachment; filename="${encodeURIComponent(path.basename(filePath))}"`,
   });
   fs.createReadStream(filePath).pipe(res);
+}
+
+function sendJson(res: http.ServerResponse, data: unknown): void {
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(data));
 }
 
 function readRequestBody(req: http.IncomingMessage): Promise<string> {
@@ -756,7 +838,7 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(renderHome(url.searchParams.get('error') ?? undefined));
       return;
     }
@@ -778,6 +860,24 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/jobs/clear') {
+      const removed = clearFinishedJobs();
+      sendJson(res, { ok: true, message: `Đã xoá ${removed} job khỏi lịch sử` });
+      return;
+    }
+
+    const deleteMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/delete$/);
+    if (req.method === 'POST' && deleteMatch) {
+      if (!deleteJob(deleteMatch[1])) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'Không xoá được job đang chạy hoặc không tồn tại.' }));
+        return;
+      }
+      const fromDetail = (req.headers.referer ?? '').includes(`/jobs/${deleteMatch[1]}`);
+      sendJson(res, { ok: true, message: 'Đã xoá job khỏi lịch sử', ...(fromDetail ? { redirect: '/' } : {}) });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/telegram-pending/dismiss') {
       const body = await readRequestBody(req);
       const params = new URLSearchParams(body);
@@ -796,10 +896,10 @@ const server = http.createServer((req, res) => {
       const job = jobs.get(jobMatch[1]);
       if (!job) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Không tìm thấy job này (có thể server đã khởi động lại).');
+        res.end('Không tìm thấy job này (có thể đã bị xoá khỏi lịch sử).');
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(renderJob(job));
       return;
     }
@@ -849,6 +949,15 @@ const server = http.createServer((req, res) => {
 });
 
 fs.mkdirSync(PROCESSED_DIR, { recursive: true });
+loadJobs();
+
+// Ghi lịch sử lần cuối trước khi tắt (systemd restart gửi SIGTERM).
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    saveJobsNow();
+    process.exit(0);
+  });
+}
 
 // Ngay khi ghép xong kết quả Risky (telegram-watcher.ts, độc lập không cần Chrome) — xếp tiếp job
 // import ngược lại Apollo vào hàng đợi DÙNG CHUNG Chrome profile Apollo (xem enqueueReimportJob).
