@@ -12,6 +12,17 @@ const TAB_ELEMENT_IDS: Record<'TEAM' | 'GOOGLE', string> = {
   GOOGLE: 'googleOption',
 };
 
+// Các popup báo lỗi của meetscript.io (đã gặp thực tế: "An error occurred. Please try again later.").
+const MEETSCRIPT_ERROR_PATTERN = /error|try again|failed|failure|invalid|expired|unauthori[sz]ed|lỗi|thất bại/i;
+
+/** meetscript.io đã nhận request nhưng báo lỗi qua popup — không có kết quả nào sẽ được gửi về. */
+export class MeetscriptRejectedError extends Error {
+  constructor(public readonly popupMessage: string) {
+    super(`meetscript.io báo lỗi: "${popupMessage}"`);
+    this.name = 'MeetscriptRejectedError';
+  }
+}
+
 /** Lưu lại bằng chứng thật (HTML + danh sách frame) khi không tìm được nút, thay vì tiếp tục đoán mò. */
 async function dumpDebugEvidence(page: Page, downloadDir: string, tab: string): Promise<string> {
   const ts = Date.now();
@@ -114,6 +125,12 @@ export async function uploadRiskyToMeetscript(
     }
 
     logger.info(`Đã bấm OK trên popup xác nhận: "${dialogMessage}" — ảnh: ${resultPath}`);
+    // Popup không phải lúc nào cũng là "thành công" — meetscript.io dùng chính popup này để báo lỗi
+    // (vd "An error occurred. Please try again later."). Lúc đó KHÔNG có kết quả nào được gửi qua
+    // Telegram, nên phải coi là upload thất bại (để thử lại), không được ghi vào sổ chờ Telegram.
+    if (MEETSCRIPT_ERROR_PATTERN.test(dialogMessage)) {
+      throw new MeetscriptRejectedError(dialogMessage);
+    }
     return resultPath;
   } catch (err) {
     const debugPath = `${downloadDir}/debug-meetscript-${tab.toLowerCase()}-${Date.now()}.png`;

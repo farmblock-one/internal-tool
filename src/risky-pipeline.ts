@@ -65,6 +65,36 @@ async function runWithConcurrency<T>(
   return results;
 }
 
+// Thử lại khi meetscript.io báo lỗi ("An error occurred. Please try again later.") hoặc không phản
+// hồi — đã gặp thực tế khi nhiều lượt upload cùng lúc. Nghỉ tăng dần giữa các lần thử.
+const UPLOAD_MAX_ATTEMPTS = 3;
+const UPLOAD_RETRY_DELAYS_MS = [60_000, 180_000];
+// Các lượt upload bắt đầu cách nhau chừng này, không ập vào meetscript.io cùng 1 lúc.
+const UPLOAD_START_STAGGER_MS = 15_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function uploadWithRetry(upload: () => Promise<string>, label: string): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+    try {
+      if (attempt > 1) logger.warn(`Thử upload lại lượt ${label} — lần ${attempt}/${UPLOAD_MAX_ATTEMPTS}...`);
+      return await upload();
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < UPLOAD_MAX_ATTEMPTS) {
+        const delay = UPLOAD_RETRY_DELAYS_MS[attempt - 1] ?? UPLOAD_RETRY_DELAYS_MS[UPLOAD_RETRY_DELAYS_MS.length - 1];
+        logger.warn(`Upload lượt ${label} thất bại (${msg}) — đợi ${Math.round(delay / 1000)}s rồi thử lại.`);
+        await sleep(delay);
+      } else {
+        logger.error(`Upload lượt ${label} thất bại sau ${UPLOAD_MAX_ATTEMPTS} lần thử: ${msg}`);
+      }
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * Xử lý 1 file Risky: đổi sang Excel (tự tách thành nhiều phần nếu vượt quá 1000 lead/phần —
  * giới hạn của meetscript.io), bắt cURL Teams + Gmail 1 LẦN DUY NHẤT (phiên đăng nhập dùng chung
@@ -149,10 +179,16 @@ export async function runRiskyFlow(
 
   const screenshots: Array<{ chunkIndex: number; kind: 'TEAM' | 'GOOGLE'; screenshotPath: string }> =
     await runWithConcurrency(
-      uploadTasks.map((task) => async () => {
+      uploadTasks.map((task, taskIndex) => async () => {
+        // Chỉ giãn các lượt ĐẦU TIÊN (chạy cùng lúc khi pool vừa khởi động); các lượt sau tự giãn
+        // theo thời gian chờ của lượt trước.
+        if (taskIndex > 0 && taskIndex < config.riskyConcurrency) await sleep(taskIndex * UPLOAD_START_STAGGER_MS);
         const excelPath = excelPaths[task.chunkIndex];
         const curl = task.kind === 'TEAM' ? teamsCurl : gmailCurl;
-        const screenshotPath = await uploadRiskyToMeetscript(context, curl, excelPath, DOWNLOAD_DIR, task.kind);
+        const screenshotPath = await uploadWithRetry(
+          () => uploadRiskyToMeetscript(context, curl, excelPath, DOWNLOAD_DIR, task.kind),
+          `${task.kind} phần ${task.chunkIndex + 1}/${excelPaths.length}`,
+        );
         // Đăng ký "sổ chờ" ngay sau khi upload thành công — bộ phận theo dõi Telegram (chạy nền,
         // tách biệt) sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi vào group.
         registerExpectedTelegramFile(excelPath, task.kind, jobId);
