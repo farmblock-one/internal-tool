@@ -40,11 +40,21 @@ const UPLOAD_START_STAGGER_MS = 15_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Trả về đường dẫn ảnh xác nhận nếu thành công, `null` nếu thất bại sau mọi lần thử. */
-async function uploadWithRetry(upload: () => Promise<string>, label: string): Promise<string | null> {
+/**
+ * Trả về đường dẫn ảnh xác nhận nếu thành công, `null` nếu thất bại sau mọi lần thử. Trước mỗi lần
+ * thử lại gọi `beforeRetry` (bắt cURL mới — cURL cũ có thể đã hết hạn, dùng lại thì vẫn hỏng).
+ */
+async function uploadWithRetry(
+  upload: () => Promise<string>,
+  label: string,
+  beforeRetry: () => Promise<void>,
+): Promise<string | null> {
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
     try {
-      if (attempt > 1) logger.warn(`Thử upload lại lượt ${label} — lần ${attempt}/${UPLOAD_MAX_ATTEMPTS}...`);
+      if (attempt > 1) {
+        logger.warn(`Thử upload lại lượt ${label} — lần ${attempt}/${UPLOAD_MAX_ATTEMPTS}, bắt cURL mới trước...`);
+        await beforeRetry();
+      }
       return await upload();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -156,6 +166,38 @@ export async function runRiskyFlow(
   fs.writeFileSync(gmailCurlPath, gmailCurl);
   logger.info(`Đã lưu cURL Gmail để kiểm tra: ${gmailCurlPath}`);
 
+  // cURL hiện hành của mỗi bên (dùng chung cho mọi lượt). Khi 1 lượt upload thất bại, bắt cURL MỚI
+  // cho đúng bên đó rồi mới thử lại — các lượt sau cũng dùng luôn cURL mới này. Nhiều lượt cùng
+  // hỏng 1 lúc thì chỉ bắt lại 1 lần (dùng chung lần bắt đang chạy, hoặc bản đã mới hơn lúc hỏng).
+  type Kind = 'TEAM' | 'GOOGLE';
+  const curls: Record<Kind, { value: string; version: number; refreshing?: Promise<void> }> = {
+    TEAM: { value: teamsCurl, version: 1 },
+    GOOGLE: { value: gmailCurl, version: 1 },
+  };
+  const refreshCurl = async (kind: Kind, usedVersion: number): Promise<void> => {
+    const entry = curls[kind];
+    if (entry.version > usedVersion) return; // lượt khác đã bắt cURL mới sau khi mình dùng bản cũ
+    if (!entry.refreshing) {
+      entry.refreshing = (async () => {
+        try {
+          const fresh =
+            kind === 'TEAM' ? await fetchTeamsSearchCurl(context, DOWNLOAD_DIR) : await fetchGmailLookupCurl(context, DOWNLOAD_DIR);
+          entry.value = fresh;
+          entry.version++;
+          const freshPath = path.join(PROCESSED_DIR, `${kind === 'TEAM' ? 'teams' : 'gmail'}-curl-${ts}-v${entry.version}.txt`);
+          fs.writeFileSync(freshPath, fresh);
+          logger.info(`Đã bắt cURL ${kind === 'TEAM' ? 'Teams' : 'Gmail'} mới (bản ${entry.version}): ${freshPath}`);
+        } catch (err) {
+          // Không bắt được cURL mới thì vẫn thử lại với bản cũ, không dừng cả lượt.
+          logger.error(`Không bắt được cURL ${kind} mới, thử lại bằng cURL cũ:`, err);
+        } finally {
+          entry.refreshing = undefined;
+        }
+      })();
+    }
+    await entry.refreshing;
+  };
+
   const excelPaths = emailChunks.map((chunkEmails, index) => {
     const suffix = emailChunks.length > 1 ? `-part${index + 1}` : '';
     const excelPath = path.join(PROCESSED_DIR, `risky-${ts}${suffix}.xlsx`);
@@ -186,11 +228,17 @@ export async function runRiskyFlow(
         // Chỉ giãn các lượt ĐẦU TIÊN (khởi động cùng lúc); các lượt sau tự giãn theo lượt trước.
         if (taskIndex > 0 && taskIndex < config.riskyConcurrency) await sleep(taskIndex * UPLOAD_START_STAGGER_MS);
         const excelPath = excelPaths[task.chunkIndex];
-        const curl = task.kind === 'TEAM' ? teamsCurl : gmailCurl;
         const label = `${task.kind} phần ${task.chunkIndex + 1}/${excelPaths.length}`;
+        let usedVersion = 0;
         const screenshotPath = await uploadWithRetry(
-          () => uploadRiskyToMeetscript(context, curl, excelPath, DOWNLOAD_DIR, task.kind),
+          () => {
+            // Luôn lấy cURL MỚI NHẤT tại thời điểm thử (có thể đã được lượt khác bắt lại).
+            const current = curls[task.kind];
+            usedVersion = current.version;
+            return uploadRiskyToMeetscript(context, current.value, excelPath, DOWNLOAD_DIR, task.kind);
+          },
           label,
+          () => refreshCurl(task.kind, usedVersion),
         );
         // Đăng ký "sổ chờ" CHỈ khi upload thành công (có popup xác nhận) — bộ phận theo dõi Telegram
         // sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi vào group.
