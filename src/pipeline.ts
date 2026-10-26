@@ -3,7 +3,7 @@ import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
 import { exportListEmails, ApolloLoggedOutError, type ExportListResult } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
-import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue, mergeByEmail } from './csv-utils.js';
+import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue, mergeByEmail, findColumn } from './csv-utils.js';
 import { writeRowsAsXlsx } from './xlsx-utils.js';
 import { buildOutputXlsxPath, sanitizeToFileName } from './filename-utils.js';
 import { logger } from './logger.js';
@@ -82,8 +82,23 @@ export async function runFlow(apolloListUrl: string, outputFileName?: string): P
   writeCsv(cleanedExportPath, cleanedRows);
   logger.info(`Đã xoá cột Contact Owner/Account Owner: ${cleanedExportPath}`);
 
-  // 3. Verify email qua Debounce -> file có thêm cột RESULT
-  const debounceResultPath = await verifyListViaApi(cleanedExportPath, PROCESSED_DIR);
+  // 3. Verify email qua Debounce -> file có thêm cột RESULT. Chỉ gửi DUY NHẤT cột email (bỏ trùng,
+  // bỏ ô trống): Debounce giới hạn file 20 MB, gửi cả file Apollo nhiều cột thì list vài nghìn lead
+  // đã vượt (gặp thực tế với list 6k lead). Kết quả Debounce vốn chỉ có các cột của họ (EMAIL,
+  // RESULT, REASON...), các cột Apollo được ghép lại theo email ở bước sau (mergeByEmail).
+  const emailCol = findColumn(cleanedRows, ['email']);
+  const seen = new Set<string>();
+  const emailOnlyRows = cleanedRows
+    .map((r) => String(r[emailCol] ?? '').trim())
+    .filter((email) => email !== '' && !seen.has(email.toLowerCase()) && seen.add(email.toLowerCase()))
+    .map((email) => ({ [emailCol]: email }));
+  const debounceInputPath = path.join(PROCESSED_DIR, `debounce-input-${Date.now()}.csv`);
+  writeCsv(debounceInputPath, emailOnlyRows);
+  logger.info(
+    `Đã tạo file chỉ gồm cột email để gửi Debounce: ${emailOnlyRows.length} email ` +
+      `(từ ${cleanedRows.length} lead, đã bỏ trùng/ô trống) — ${(fs.statSync(debounceInputPath).size / 1024).toFixed(0)} KB.`,
+  );
+  const debounceResultPath = await verifyListViaApi(debounceInputPath, PROCESSED_DIR);
 
   // Truyền thêm `cleanedExportPath` (file Apollo ĐẦY ĐỦ cột đã gửi lên Debounce) để bước sau ghép
   // lại đúng theo email — nếu không có file này (vd chạy lại qua `npm run resume` chỉ với file kết
