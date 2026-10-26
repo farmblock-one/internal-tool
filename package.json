@@ -13,7 +13,8 @@
     "upload-drive": "tsx src/upload-drive.ts",
     "apollo:login": "tsx src/login-apollo.ts",
     "risky:login": "tsx src/login-risky.ts",
-    "telegram:login": "tsx src/telegram-login.ts"
+    "telegram:login": "tsx src/telegram-login.ts",
+    "verify-merge": "tsx src/verify-merge.ts"
   },
   "dependencies": {
     "csv-parse": "^5.5.6",
