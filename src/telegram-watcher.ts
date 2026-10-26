@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import dns from 'node:dns';
-import { TelegramClient } from 'teleproto';
+import { TelegramClient, Api } from 'teleproto';
 import { StringSession } from 'teleproto/sessions';
 import { NewMessage, type NewMessageEvent } from 'teleproto/events';
 import { config } from './config.js';
@@ -100,6 +100,7 @@ export function getJobTelegramStatus(jobId: string): JobTelegramStatus {
  */
 export function registerRiskyJobMeta(jobId: string, masterXlsxPath: string, totalExpected: number): void {
   jobMeta.set(jobId, { masterXlsxPath, totalExpected, mergeStatus: 'pending' });
+  saveJobsState();
 }
 
 let onMergeCompleteHandler: ((masterXlsxPath: string) => void) | undefined;
@@ -115,11 +116,44 @@ export function setOnMergeComplete(handler: (masterXlsxPath: string) => void): v
 }
 
 let pending: PendingEntry[] = [];
-// Chỉ lưu trong bộ nhớ (không cần ghi đĩa) — tương tự danh sách job trong server.ts, mất khi
-// restart server cũng không sao, vì bản thân job đó cũng không còn hiện trên web UI nữa.
+// Tiến trình nhận kết quả của từng job Risky (đã nhận file nào, cần ghép vào file Excel nào). Lưu
+// xuống đĩa vì lịch sử job giờ được giữ qua các lần restart (xem server.ts) — nếu chỉ nằm trong bộ
+// nhớ thì restart giữa lúc đang chờ bot trả kết quả sẽ làm mất thông tin này, file về sau sẽ được
+// tải nhưng KHÔNG bao giờ được ghép vào file Excel gốc.
 const receivedByJob = new Map<string, ReceivedEntry[]>();
 const jobMeta = new Map<string, JobMeta>();
+const JOBS_STATE_FILE = path.resolve('data/processed/telegram-jobs.json');
 let started = false;
+
+function saveJobsState(): void {
+  try {
+    fs.mkdirSync(path.dirname(JOBS_STATE_FILE), { recursive: true });
+    const data = {
+      jobMeta: Object.fromEntries(jobMeta),
+      receivedByJob: Object.fromEntries(receivedByJob),
+    };
+    const tmp = `${JOBS_STATE_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, JOBS_STATE_FILE);
+  } catch (err) {
+    logger.warn(`Không lưu được tiến trình Telegram: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function loadJobsState(): void {
+  if (!fs.existsSync(JOBS_STATE_FILE)) return;
+  try {
+    const data = JSON.parse(fs.readFileSync(JOBS_STATE_FILE, 'utf-8')) as {
+      jobMeta?: Record<string, JobMeta>;
+      receivedByJob?: Record<string, ReceivedEntry[]>;
+    };
+    for (const [id, meta] of Object.entries(data.jobMeta ?? {})) jobMeta.set(id, meta);
+    for (const [id, list] of Object.entries(data.receivedByJob ?? {})) receivedByJob.set(id, list);
+    logger.info(`Đã nạp tiến trình Telegram của ${jobMeta.size} job Risky từ đĩa.`);
+  } catch (err) {
+    logger.warn(`Không đọc được tiến trình Telegram (${JOBS_STATE_FILE}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 function loadPending(): void {
   try {
@@ -232,11 +266,13 @@ let userClient: TelegramClient | undefined;
  * ở `config.ts`). Tài khoản người thật thấy được tin nhắn của MỌI bot trong group bình thường.
  */
 async function handleIncomingMessage(event: NewMessageEvent): Promise<void> {
-  const message = event.message;
+  await handleMessage(event.message, event.chatId?.toString());
+}
+
+async function handleMessage(message: Api.Message, chatId: string | undefined): Promise<void> {
   const fileName = message.file?.name;
   if (!fileName) return; // không phải tin nhắn có đính kèm file — bỏ qua, không cần log
 
-  const chatId = event.chatId?.toString();
   if (chatId !== config.telegramChatId) return; // group khác (tài khoản này có thể ở nhiều group) — bỏ qua, không log
 
   // Group có nhiều người, nhiều tin nhắn — PHẢI kiểm tra đúng người gửi là bot meetscript.io,
@@ -276,6 +312,7 @@ async function handleIncomingMessage(event: NewMessageEvent): Promise<void> {
       const list = receivedByJob.get(entry.jobId) ?? [];
       list.push({ kind: entry.kind, fileName, receivedAt: Date.now() });
       receivedByJob.set(entry.jobId, list);
+      saveJobsState();
       await maybeMergeJob(entry.jobId);
     }
     pending.splice(matchIndex, 1);
@@ -302,6 +339,38 @@ async function startUserClient(): Promise<void> {
   userClient.addEventHandler((event: NewMessageEvent) => {
     void handleIncomingMessage(event).catch((err) => logger.error('Lỗi khi xử lý tin nhắn Telegram mới:', err));
   }, new NewMessage({}));
+  await catchUpMissedMessages();
+}
+
+// Số tin nhắn gần nhất trong group được quét lại lúc khởi động.
+const CATCH_UP_MESSAGE_LIMIT = 300;
+
+/**
+ * Tool chỉ "nghe" tin nhắn MỚI trong lúc đang chạy — file bot gửi đúng lúc service đang tắt/restart
+ * sẽ bị lỡ mất. Lúc khởi động, quét lại các tin nhắn gần nhất trong group và xử lý như tin mới
+ * (chỉ những file khớp mục đang chờ mới được nhận, nên quét lại không bị nhận trùng).
+ */
+async function catchUpMissedMessages(): Promise<void> {
+  if (!userClient || pending.length === 0) return;
+  try {
+    const dialogs = await userClient.getDialogs({ limit: 200 });
+    const dialog = dialogs.find((d) => d.id?.toString() === config.telegramChatId);
+    if (!dialog?.entity) {
+      logger.warn(`Không tìm thấy group TELEGRAM_CHAT_ID=${config.telegramChatId} trong danh sách chat — bỏ qua bước quét lại tin nhắn cũ.`);
+      return;
+    }
+    const oldestWaiting = Math.min(...pending.map((e) => e.registeredAt));
+    const messages = await userClient.getMessages(dialog.entity, { limit: CATCH_UP_MESSAGE_LIMIT });
+    const candidates = messages
+      .filter((m) => m.file?.name && m.date * 1000 >= oldestWaiting - 5 * 60_000)
+      .sort((a, b) => a.date - b.date);
+    logger.info(`Quét lại ${messages.length} tin nhắn gần nhất trong group: ${candidates.length} file gửi sau lúc bắt đầu chờ.`);
+    for (const message of candidates) {
+      await handleMessage(message, config.telegramChatId);
+    }
+  } catch (err) {
+    logger.error('Lỗi khi quét lại tin nhắn cũ trong group Telegram (vẫn tiếp tục nghe tin nhắn mới):', err);
+  }
 }
 
 /**
@@ -369,6 +438,8 @@ async function maybeMergeJob(jobId: string): Promise<void> {
     meta.mergeStatus = 'error';
     meta.mergeError = err instanceof Error ? err.message : String(err);
     logger.error(`Lỗi khi ghép kết quả Risky vào file Excel gốc (job ${jobId}):`, err);
+  } finally {
+    saveJobsState();
   }
 }
 
@@ -433,6 +504,7 @@ export function startTelegramWatcher(): void {
   }
   started = true;
   loadPending();
+  loadJobsState();
   logger.info(`Bắt đầu theo dõi kết quả Telegram (đang có ${pending.length} mục chờ từ trước, nếu có).`);
   if (config.telegramResultBotUsername) {
     logger.info(`Chỉ nhận file từ đúng người gửi: @${normalizeUsername(config.telegramResultBotUsername)}.`);
