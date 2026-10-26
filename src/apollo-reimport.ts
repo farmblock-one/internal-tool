@@ -21,7 +21,7 @@ export function buildApolloReimportCsv(masterXlsxPath: string): string {
   const csvPath = path.join(PROCESSED_DIR, `apollo-reimport-${Date.now()}.csv`);
   writeCsv(csvPath, reduced);
   const dropped = rows.length - reduced.length;
-  if (dropped > 0) logger.info(`Đã bỏ ${dropped} dòng không có email khỏi file import Apollo.`);
+  if (dropped > 0) logger.info(`Đã bỏ ${dropped} dòng không có email hoặc RESULT trống khỏi file import Apollo.`);
   if (reduced.length === 0) throw new Error('File Excel không có dòng nào có email — không có gì để import lên Apollo.');
   logger.info(`Đã tạo file CSV (chỉ email + RESULT) để import ngược lại Apollo: ${csvPath} (${reduced.length} dòng).`);
   return csvPath;

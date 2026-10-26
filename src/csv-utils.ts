@@ -30,14 +30,16 @@ export function findColumn(rows: Row[], aliases: string[]): string {
 
 /**
  * Giữ lại đúng 2 cột email + RESULT, dùng cho file import ngược lại Apollo. Bỏ hẳn các dòng không
- * có email (ô trống hoặc chỉ có khoảng trắng) — dòng đó Apollo không khớp được với contact nào.
+ * có email (Apollo không khớp được với contact nào) hoặc RESULT trống.
  */
 export function onlyEmailAndResult(rows: Row[]): Row[] {
   const emailCol = findColumn(rows, ['email']);
   const resultCol = findColumn(rows, ['result']);
+  // Bỏ cả dòng có RESULT trống (vd Debounce không trả kết quả cho email đó) — import lên Apollo sẽ
+  // xoá mất giá trị DEBOUNCED đang có của contact đó.
   return rows
     .map((r) => ({ email: String(r[emailCol] ?? '').trim(), RESULT: String(r[resultCol] ?? '').trim() }))
-    .filter((r) => r.email !== '');
+    .filter((r) => r.email !== '' && r.RESULT !== '');
 }
 
 /** Lấy ra danh sách email (chỉ giá trị, không kèm cột nào khác) — dùng cho file Excel upload Risky. */
@@ -107,4 +109,35 @@ export function dropColumns(rows: Row[], columnNames: string[]): Row[] {
     }
     return cleaned;
   });
+}
+
+/**
+ * File kết quả Debounce đôi khi có CÙNG 1 email ở 2 dòng liền nhau (Debounce tự kiểm tra lại),
+ * có lúc 2 kết quả khác nhau (vd "Unknown" rồi "Safe to Send") — đã gặp thực tế: 11/6145 email.
+ * Giữ 1 dòng mỗi email: ưu tiên kết quả RÕ RÀNG hơn "Unknown"; cùng mức rõ ràng thì giữ dòng sau.
+ */
+export function dedupeDebounceResults(rows: Row[]): { rows: Row[]; duplicates: { email: string; results: string[]; kept: string }[] } {
+  if (rows.length === 0) return { rows, duplicates: [] };
+  const emailCol = findColumn(rows, ['email']);
+  const resultCol = findColumn(rows, ['result']);
+  const isUnknown = (r: Row) => (r[resultCol] ?? '').trim().toLowerCase() === 'unknown';
+  const byEmail = new Map<string, Row>();
+  const seen = new Map<string, string[]>();
+  const order: string[] = [];
+  for (const row of rows) {
+    const email = (row[emailCol] ?? '').trim().toLowerCase();
+    if (!email) continue;
+    const prev = byEmail.get(email);
+    seen.set(email, [...(seen.get(email) ?? []), (row[resultCol] ?? '').trim()]);
+    if (!prev) {
+      order.push(email);
+      byEmail.set(email, row);
+    } else if (!(isUnknown(row) && !isUnknown(prev))) {
+      byEmail.set(email, row);
+    }
+  }
+  const duplicates = [...seen]
+    .filter(([, results]) => results.length > 1)
+    .map(([email, results]) => ({ email, results, kept: (byEmail.get(email)![resultCol] ?? '').trim() }));
+  return { rows: order.map((e) => byEmail.get(e)!), duplicates };
 }

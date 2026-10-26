@@ -3,7 +3,7 @@ import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
 import { exportListEmails, ApolloLoggedOutError, type ExportListResult } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
-import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue, mergeByEmail, findColumn } from './csv-utils.js';
+import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue, mergeByEmail, findColumn, dedupeDebounceResults } from './csv-utils.js';
 import { writeRowsAsXlsx } from './xlsx-utils.js';
 import { buildOutputXlsxPath, sanitizeToFileName } from './filename-utils.js';
 import { logger } from './logger.js';
@@ -135,7 +135,14 @@ export async function runFromDebounceResult(
   // EMAIL + các cột Debounce trả về) — cảnh báo rõ bên dưới nếu rơi vào trường hợp này.
   apolloRowsPath?: string,
 ): Promise<FlowResult> {
-  const debounceRows = readCsv(debounceResultPath);
+  const rawDebounceRows = readCsv(debounceResultPath);
+  const { rows: debounceRows, duplicates } = dedupeDebounceResults(rawDebounceRows);
+  if (duplicates.length > 0) {
+    logger.warn(
+      `Kết quả Debounce có ${duplicates.length} email bị lặp (Debounce tự kiểm tra lại) — giữ kết quả rõ ràng hơn "Unknown":\n` +
+        duplicates.map((d) => `   ${d.email}: ${d.results.join(' / ')} -> giữ "${d.kept}"`).join('\n'),
+    );
+  }
 
   // 4. Bước import ngược lại Apollo (importCsv trong apollo.ts) KHÔNG chạy ở đây — chạy ở 1 giai
   // đoạn SAU, trên file Excel CUỐI (sau khi đã có đủ kết quả Risky thật, xem apollo-reimport.ts
@@ -150,6 +157,21 @@ export async function runFromDebounceResult(
     const apolloRows = readCsv(apolloRowsPath);
     mergedRows = mergeByEmail(apolloRows, debounceRows);
     logger.info(`Đã ghép ${mergedRows.length} dòng Apollo với kết quả Debounce (theo email): ${apolloRowsPath}`);
+    // Email đã gửi Debounce nhưng KHÔNG có dòng kết quả nào (đã gặp thực tế: 11/6145) — RESULT để
+    // trống trong file Excel, và KHÔNG được import lên Apollo (xem apollo-reimport.ts).
+    const apolloEmailCol = findColumn(apolloRows, ['email']);
+    const resultEmails = new Set(debounceRows.map((r) => String(r[findColumn(debounceRows, ['email'])] ?? '').trim().toLowerCase()));
+    const missing = [
+      ...new Set(
+        apolloRows.map((r) => String(r[apolloEmailCol] ?? '').trim().toLowerCase()).filter((e) => e && !resultEmails.has(e)),
+      ),
+    ];
+    if (missing.length > 0) {
+      logger.warn(
+        `Debounce KHÔNG trả kết quả cho ${missing.length} email (RESULT để trống, không import lên Apollo — cần kiểm tra tay):\n` +
+          missing.map((e) => `   ${e}`).join('\n'),
+      );
+    }
   } else {
     logger.warn(
       'Không có file Apollo gốc để ghép cột (chạy từ `npm run resume` mà không truyền file Apollo) — ' +

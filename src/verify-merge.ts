@@ -7,7 +7,7 @@
 //   3. Cột RESULT: khớp với kết quả Debounce của đúng email đó không. Riêng lead Debounce trả "Risky"
 //      được phép đã đổi thành "Safe to Send"/"Do not Send" (bước ghép kết quả Teams/Google).
 import path from 'node:path';
-import { readCsv, findColumn, type Row } from './csv-utils.js';
+import { readCsv, findColumn, dedupeDebounceResults, type Row } from './csv-utils.js';
 import { readXlsxRows } from './xlsx-utils.js';
 
 const [xlsxPath, debouncePath, apolloPath] = process.argv.slice(2);
@@ -23,7 +23,8 @@ const norm = (v: unknown) => String(v ?? '').trim();
 const key = (v: unknown) => norm(v).toLowerCase();
 
 const finalRows = readXlsxRows(xlsxPath, 'Leads');
-const debounceRows = readCsv(debouncePath);
+// Cùng quy tắc với tool: email lặp trong kết quả Debounce giữ kết quả rõ ràng hơn "Unknown".
+const debounceRows = dedupeDebounceResults(readCsv(debouncePath)).rows;
 const apolloRows = readCsv(apolloPath);
 
 const finalEmailCol = findColumn(finalRows, ['email']);
