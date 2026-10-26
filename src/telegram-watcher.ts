@@ -115,6 +115,17 @@ export function setRiskyJobExpectedTotal(jobId: string, totalExpected: number): 
   void maybeMergeJob(jobId);
 }
 
+/**
+ * Một mục chờ bị bỏ (bấm "Bỏ qua" trên web hoặc quá hạn 24 tiếng) — job đó sẽ không bao giờ nhận
+ * đủ số file ban đầu, nên giảm số cần chờ đi 1 để vẫn tự ghép được với các kết quả đã có.
+ */
+function onPendingAbandoned(entry: PendingEntry): void {
+  if (!entry.jobId) return;
+  const meta = jobMeta.get(entry.jobId);
+  if (!meta || meta.mergeStatus !== 'pending') return;
+  setRiskyJobExpectedTotal(entry.jobId, Math.max(0, meta.totalExpected - 1));
+}
+
 let onMergeCompleteHandler: ((masterXlsxPath: string) => void) | undefined;
 
 /**
@@ -223,9 +234,10 @@ function mergePendingFromDisk(): void {
 export function dismissPendingEntry(excelPath: string, kind: ResultKind): boolean {
   const idx = pending.findIndex((e) => e.excelPath === excelPath && e.kind === kind);
   if (idx === -1) return false;
-  pending.splice(idx, 1);
+  const [entry] = pending.splice(idx, 1);
   savePending();
   logger.info(`Đã bỏ theo dõi thủ công (team tự xác nhận đã có file): ${kind} cho ${path.basename(excelPath)}.`);
+  onPendingAbandoned(entry);
   return true;
 }
 
@@ -413,7 +425,7 @@ async function maybeMergeJob(jobId: string): Promise<void> {
   const meta = jobMeta.get(jobId);
   if (!meta || meta.mergeStatus !== 'pending') return;
   const received = receivedByJob.get(jobId) ?? [];
-  if (received.length < meta.totalExpected) return;
+  if (received.length === 0 || received.length < meta.totalExpected) return;
 
   const resultFiles: MergeFileRef[] = received.map((r) => ({ kind: r.kind, filePath: path.join(RESULTS_DIR, r.fileName) }));
   try {
@@ -470,6 +482,7 @@ function checkTimeouts(): void {
           `(có thể job upload bị lỗi, hoặc file đã được bot gửi nhưng sai tên không khớp được).`,
       );
       changed = true;
+      onPendingAbandoned(entry);
       return false;
     }
     if (entry.warnedAt === undefined && now - entry.registeredAt > warnAfterMs) {

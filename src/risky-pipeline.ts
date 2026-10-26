@@ -6,7 +6,7 @@ import { readCsv, extractEmails } from './csv-utils.js';
 import { writeRiskyExcel } from './xlsx-utils.js';
 import { fetchTeamsSearchCurl } from './teams.js';
 import { fetchGmailLookupCurl } from './gmail.js';
-import { uploadRiskyToMeetscript } from './meetscript.js';
+import { uploadRiskyToMeetscript, MeetscriptUploadError } from './meetscript.js';
 import { registerExpectedTelegramFile, registerRiskyJobMeta, setRiskyJobExpectedTotal } from './telegram-watcher.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
@@ -31,6 +31,9 @@ export interface RiskyFlowResult {
   successfulLots: number;
   // Các lượt thất bại, vd "GOOGLE phần 2/2" — lead của phần đó giữ nguyên nhãn "Risky".
   failedLots: string[];
+  // Các lượt ĐÃ BẤM Upload nhưng không thấy popup. Không upload lại (tránh kết quả trùng), vẫn chờ
+  // kết quả qua Telegram như lượt thành công.
+  unconfirmedLots?: string[];
 }
 
 // Lượt upload KHÔNG thấy popup xác nhận (= thất bại) thì thử lại, nghỉ tăng dần giữa các lần.
@@ -41,34 +44,48 @@ const UPLOAD_START_STAGGER_MS = 15_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+type UploadOutcome =
+  | { status: 'ok'; screenshotPath: string }
+  | { status: 'unconfirmed' } // đã bấm Upload nhưng không thấy popup — có thể vẫn đã gửi thành công
+  | { status: 'failed' };
+
 /**
- * Trả về đường dẫn ảnh xác nhận nếu thành công, `null` nếu thất bại sau mọi lần thử. Trước mỗi lần
- * thử lại gọi `beforeRetry` (bắt cURL mới — cURL cũ có thể đã hết hạn, dùng lại thì vẫn hỏng).
+ * Upload 1 lượt. CHỈ thử lại khi lỗi xảy ra TRƯỚC lúc bấm "Upload Data" (chưa có gì được gửi đi,
+ * thử lại an toàn). Đã bấm rồi mà không thấy popup thì KHÔNG thử lại: thực tế meetscript.io vẫn xử
+ * lý và gửi kết quả qua Telegram, upload lại chỉ sinh file trùng. Trước mỗi lần thử lại gọi
+ * `beforeRetry` (mở lại Chrome nếu đã chết + bắt cURL mới).
  */
 async function uploadWithRetry(
   upload: () => Promise<string>,
   label: string,
   beforeRetry: () => Promise<void>,
-): Promise<string | null> {
+): Promise<UploadOutcome> {
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
     try {
       if (attempt > 1) {
         logger.warn(`Thử upload lại lượt ${label} — lần ${attempt}/${UPLOAD_MAX_ATTEMPTS}, bắt cURL mới trước...`);
         await beforeRetry();
       }
-      return await upload();
+      return { status: 'ok', screenshotPath: await upload() };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof MeetscriptUploadError && err.submitted) {
+        logger.warn(
+          `Lượt ${label}: đã bấm Upload Data nhưng không xác nhận được (${msg}). KHÔNG upload lại để tránh ` +
+            `kết quả trùng — vẫn chờ kết quả qua Telegram như bình thường.`,
+        );
+        return { status: 'unconfirmed' };
+      }
       if (attempt < UPLOAD_MAX_ATTEMPTS) {
         const delay = UPLOAD_RETRY_DELAYS_MS[attempt - 1] ?? UPLOAD_RETRY_DELAYS_MS[UPLOAD_RETRY_DELAYS_MS.length - 1];
-        logger.warn(`Upload lượt ${label} thất bại (${msg}) — đợi ${Math.round(delay / 1000)}s rồi thử lại.`);
+        logger.warn(`Upload lượt ${label} lỗi trước khi gửi được (${msg}) — đợi ${Math.round(delay / 1000)}s rồi thử lại.`);
         await sleep(delay);
       } else {
         logger.error(`Upload lượt ${label} thất bại sau ${UPLOAD_MAX_ATTEMPTS} lần thử: ${msg}`);
       }
     }
   }
-  return null;
+  return { status: 'failed' };
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -256,7 +273,7 @@ export async function runRiskyFlow(
     registerRiskyJobMeta(jobId, masterXlsxPath, totalLots);
   }
 
-  const screenshots: Array<{ chunkIndex: number; kind: 'TEAM' | 'GOOGLE'; screenshotPath: string | null }> =
+  const screenshots: Array<{ chunkIndex: number; kind: 'TEAM' | 'GOOGLE'; outcome: UploadOutcome }> =
     await runWithConcurrency(
       uploadTasks.map((task, taskIndex) => async () => {
         // Chỉ giãn các lượt ĐẦU TIÊN (khởi động cùng lúc); các lượt sau tự giãn theo lượt trước.
@@ -264,7 +281,7 @@ export async function runRiskyFlow(
         const excelPath = excelPaths[task.chunkIndex];
         const label = `${task.kind} phần ${task.chunkIndex + 1}/${excelPaths.length}`;
         let usedVersion = 0;
-        const screenshotPath = await uploadWithRetry(
+        const outcome = await uploadWithRetry(
           () => {
             // Luôn lấy cURL MỚI NHẤT tại thời điểm thử (có thể đã được lượt khác bắt lại).
             const current = curls[task.kind];
@@ -277,10 +294,10 @@ export async function runRiskyFlow(
             await refreshCurl(task.kind, usedVersion);
           },
         );
-        // Đăng ký "sổ chờ" CHỈ khi upload thành công (có popup xác nhận) — bộ phận theo dõi Telegram
-        // sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi vào group.
-        if (screenshotPath) registerExpectedTelegramFile(excelPath, task.kind, jobId);
-        return { chunkIndex: task.chunkIndex, kind: task.kind, screenshotPath };
+        // Đăng ký "sổ chờ" khi đã gửi được (có popup, hoặc đã bấm Upload mà chưa xác nhận) — bộ phận
+        // theo dõi Telegram sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi về.
+        if (outcome.status !== 'failed') registerExpectedTelegramFile(excelPath, task.kind, jobId);
+        return { chunkIndex: task.chunkIndex, kind: task.kind, outcome };
       }),
       config.riskyConcurrency,
       (done, total) => {
@@ -289,12 +306,15 @@ export async function runRiskyFlow(
       },
     );
 
-  const failedLots = screenshots
-    .filter((s) => !s.screenshotPath)
-    .map((s) => `${s.kind} phần ${s.chunkIndex + 1}/${excelPaths.length}`);
+  const lotLabel = (s: { kind: string; chunkIndex: number }) => `${s.kind} phần ${s.chunkIndex + 1}/${excelPaths.length}`;
+  const failedLots = screenshots.filter((s) => s.outcome.status === 'failed').map(lotLabel);
+  const unconfirmedLots = screenshots.filter((s) => s.outcome.status === 'unconfirmed').map(lotLabel);
+  if (unconfirmedLots.length > 0) {
+    logger.warn(`${unconfirmedLots.length} lượt đã gửi nhưng không thấy popup: ${unconfirmedLots.join(', ')} — vẫn chờ kết quả qua Telegram.`);
+  }
   const successfulLots = totalLots - failedLots.length;
   if (successfulLots === 0) {
-    throw new Error(`Cả ${totalLots} lượt upload meetscript.io đều thất bại (không thấy popup xác nhận sau ${UPLOAD_MAX_ATTEMPTS} lần thử).`);
+    throw new Error(`Cả ${totalLots} lượt upload meetscript.io đều thất bại (lỗi trước khi gửi được, sau ${UPLOAD_MAX_ATTEMPTS} lần thử).`);
   }
   if (failedLots.length > 0) {
     // 1 lượt hỏng KHÔNG làm hỏng cả job: chỉ chờ đúng số file của các lượt thành công rồi ghép như
@@ -310,14 +330,11 @@ export async function runRiskyFlow(
   const chunks: RiskyChunkResult[] = excelPaths.map((excelPath, chunkIndex) => {
     const team = screenshots.find((s) => s.chunkIndex === chunkIndex && s.kind === 'TEAM');
     const google = screenshots.find((s) => s.chunkIndex === chunkIndex && s.kind === 'GOOGLE');
-    return {
-      excelPath,
-      teamResultScreenshot: team?.screenshotPath ?? undefined,
-      googleResultScreenshot: google?.screenshotPath ?? undefined,
-    };
+    const shot = (s?: { outcome: UploadOutcome }) => (s?.outcome.status === 'ok' ? s.outcome.screenshotPath : undefined);
+    return { excelPath, teamResultScreenshot: shot(team), googleResultScreenshot: shot(google) };
   });
 
   logger.info(`Hoàn tất xử lý file Risky (${totalLots} lượt upload).`);
-  return { chunks, successfulLots, failedLots };
+  return { chunks, successfulLots, failedLots, unconfirmedLots };
   }
 }

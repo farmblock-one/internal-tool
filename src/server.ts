@@ -733,12 +733,13 @@ function renderRiskyJob(job: RiskyJob): string {
             (chunk, i) => `
           ${chunks.length > 1 ? `<p class="note" style="margin-bottom:0"><strong>Phần ${i + 1}/${chunks.length}</strong> · ${escapeHtml(path.basename(chunk.excelPath))}</p>` : ''}
           <div class="shots">
-            ${chunk.teamResultScreenshot ? `<div class="shot"><p>Xác nhận upload · TEAM</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" /></div>` : `<div class="shot"><p style="color:var(--err)">TEAM · upload thất bại</p></div>`}
-            ${chunk.googleResultScreenshot ? `<div class="shot"><p>Xác nhận upload · GOOGLE</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" /></div>` : `<div class="shot"><p style="color:var(--err)">GOOGLE · upload thất bại</p></div>`}
+            ${chunk.teamResultScreenshot ? `<div class="shot"><p>Xác nhận upload · TEAM</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" /></div>` : `<div class="shot"><p>TEAM · không có ảnh popup</p></div>`}
+            ${chunk.googleResultScreenshot ? `<div class="shot"><p>Xác nhận upload · GOOGLE</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" /></div>` : `<div class="shot"><p>GOOGLE · không có ảnh popup</p></div>`}
           </div>`,
           )
           .join('')}
-        ${failedLots(job.result).length > 0 ? `<div class="banner banner-warn" style="margin-top:16px"><span class="b-ico" style="color:#b57a00">${ICONS.alert}</span><div><strong>${failedLots(job.result).length} lượt upload thất bại sau 3 lần thử: ${escapeHtml(failedLots(job.result).join(', '))}</strong><p>Tool vẫn tự ghép kết quả của các lượt thành công. Lead chỉ thuộc lượt thất bại sẽ giữ nhãn Risky.</p></div></div>` : ''}`;
+        ${(job.result.unconfirmedLots ?? []).length > 0 ? `<div class="banner banner-info" style="margin-top:16px"><span class="b-ico" style="color:var(--nsc-dark)">${ICONS.mail}</span><div><strong>Đã gửi nhưng không thấy popup: ${escapeHtml((job.result.unconfirmedLots ?? []).join(', '))}</strong><p>Tool không upload lại để tránh kết quả trùng, vẫn chờ kết quả qua Telegram như bình thường. Nếu quá lâu không thấy, bấm "Bỏ qua" ở trang chủ để tool ghép với các kết quả đã có.</p></div></div>` : ''}
+        ${failedLots(job.result).length > 0 ? `<div class="banner banner-warn" style="margin-top:16px"><span class="b-ico" style="color:#b57a00">${ICONS.alert}</span><div><strong>${failedLots(job.result).length} lượt lượt không gửi được sau 3 lần thử: ${escapeHtml(failedLots(job.result).join(', '))}</strong><p>Tool vẫn tự ghép kết quả của các lượt thành công. Lead chỉ thuộc lượt thất bại sẽ giữ nhãn Risky.</p></div></div>` : ''}`;
     }
   }
 

@@ -12,6 +12,21 @@ const TAB_ELEMENT_IDS: Record<'TEAM' | 'GOOGLE', string> = {
   GOOGLE: 'googleOption',
 };
 
+/**
+ * Lỗi upload kèm thông tin ĐÃ BẤM "Upload Data" hay chưa. Đã bấm rồi thì meetscript.io có thể vẫn
+ * xử lý và gửi kết quả qua Telegram dù không hiện popup (đã gặp thực tế: không có popup nhưng bot
+ * vẫn gửi đúng file kết quả) — upload lại lúc đó sẽ tạo kết quả TRÙNG, nên nơi gọi không được thử lại.
+ */
+export class MeetscriptUploadError extends Error {
+  constructor(
+    message: string,
+    public readonly submitted: boolean,
+  ) {
+    super(message);
+    this.name = 'MeetscriptUploadError';
+  }
+}
+
 /** Lưu lại bằng chứng thật (HTML + danh sách frame) khi không tìm được nút, thay vì tiếp tục đoán mò. */
 async function dumpDebugEvidence(page: Page, downloadDir: string, tab: string): Promise<string> {
   const ts = Date.now();
@@ -42,7 +57,13 @@ export async function uploadRiskyToMeetscript(
   downloadDir: string,
   tab: 'TEAM' | 'GOOGLE' = 'TEAM',
 ): Promise<string> {
-  const page = await context.newPage();
+  let submitted = false;
+  let page: Page;
+  try {
+    page = await context.newPage();
+  } catch (err) {
+    throw new MeetscriptUploadError(err instanceof Error ? err.message : String(err), false);
+  }
   try {
     await page.goto('https://seacher.meetscript.io/', { waitUntil: 'domcontentloaded' });
 
@@ -95,6 +116,7 @@ export async function uploadRiskyToMeetscript(
     const uploadBtn = page.getByRole('button', { name: /^upload data$/i }).first();
     await uploadBtn.waitFor({ state: 'visible', timeout: 15_000 });
     await uploadBtn.click();
+    submitted = true;
 
     logger.info('Đã bấm Upload Data — đang chờ popup xác nhận (có thể mất tới ~5 phút)...');
     // Trang/Chrome bị đóng giữa chừng thì popup không bao giờ tới nữa — báo lỗi NGAY thay vì ngồi
@@ -127,7 +149,7 @@ export async function uploadRiskyToMeetscript(
     const debugPath = `${downloadDir}/debug-meetscript-${tab.toLowerCase()}-${Date.now()}.png`;
     await page.screenshot({ path: debugPath, fullPage: true }).catch(() => {});
     logger.error(`Lỗi khi upload lên meetscript.io (tab ${tab}) — đã lưu ảnh debug: ${debugPath}`);
-    throw err;
+    throw new MeetscriptUploadError(err instanceof Error ? err.message : String(err), submitted);
   } finally {
     await page.close().catch(() => {});
   }
