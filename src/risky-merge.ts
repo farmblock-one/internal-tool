@@ -20,6 +20,7 @@ export interface MergeStats {
  * lúc chạy job Apollo/Debounce), theo đúng quy tắc đã xác nhận:
  *   - Email có kết quả TRUE ở ÍT NHẤT 1 trong 2 bên (Team hoặc Google, hoặc cả 2) -> "Safe to Send".
  *   - Email mà CẢ 2 bên đều FALSE -> "Do not Send".
+ *   - Chỉ 1 bên có kết quả và là FALSE (bên kia thiếu) -> giữ "Risky", cần kiểm tra tay.
  *   - Chỉ áp dụng cho row đang có RESULT = "Risky" — không đụng tới các row Safe to Send/Invalid
  *     sẵn có (những row đó chưa từng được upload lên meetscript.io, không có kết quả gì để ghép).
  */
@@ -57,9 +58,18 @@ export function mergeRiskyResultsIntoMaster(masterXlsxPath: string, resultFiles:
       noMatchCount++;
       return row; // không thấy email này trong cả 2 file kết quả — giữ nguyên "Risky", cần kiểm tra lại tay
     }
-    const decision = teamOk === true || googleOk === true ? 'Safe to Send' : 'Do not Send';
+    if (teamOk === true || googleOk === true) {
+      updatedCount++;
+      return { ...row, [resultCol]: 'Safe to Send' };
+    }
+    if (teamOk === undefined || googleOk === undefined) {
+      // Chỉ có kết quả FALSE từ 1 bên, bên kia chưa kiểm tra (vd lượt upload bên đó thất bại) —
+      // chưa đủ căn cứ để kết luận "Do not Send", giữ nguyên "Risky" để kiểm tra tay.
+      noMatchCount++;
+      return row;
+    }
     updatedCount++;
-    return { ...row, [resultCol]: decision };
+    return { ...row, [resultCol]: 'Do not Send' };
   });
 
   overwriteXlsxSheet(masterXlsxPath, MASTER_SHEET_NAME, updatedRows);

@@ -103,6 +103,18 @@ export function registerRiskyJobMeta(jobId: string, masterXlsxPath: string, tota
   saveJobsState();
 }
 
+/**
+ * Đổi số kết quả cần đợi của 1 job (khi có lượt upload thất bại, bot chỉ gửi về kết quả của các
+ * lượt thành công). Nếu đã nhận đủ số mới thì ghép luôn.
+ */
+export function setRiskyJobExpectedTotal(jobId: string, totalExpected: number): void {
+  const meta = jobMeta.get(jobId);
+  if (!meta) return;
+  meta.totalExpected = totalExpected;
+  saveJobsState();
+  void maybeMergeJob(jobId);
+}
+
 let onMergeCompleteHandler: ((masterXlsxPath: string) => void) | undefined;
 
 /**

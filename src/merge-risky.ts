@@ -1,28 +1,50 @@
-import { mergeRiskyResultsIntoMaster } from './risky-merge.js';
+import { mergeRiskyResultsIntoMaster, type MergeFileRef } from './risky-merge.js';
 import { sendDocumentToTelegram } from './telegram-watcher.js';
 import { uploadFinalXlsxToDrive } from './drive.js';
 import { runApolloReimport } from './apollo-reimport.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
-const [masterXlsxPath, teamFilePath, googleFilePath] = process.argv.slice(2);
+const [masterXlsxPath, ...fileArgs] = process.argv.slice(2);
 
-if (!masterXlsxPath || !teamFilePath || !googleFilePath) {
+// 2 cách gọi:
+//   npm run merge-risky -- <goc.xlsx> <TEAM.xlsx> <GOOGLE.xlsx>            (cách cũ, 1 phần)
+//   npm run merge-risky -- <goc.xlsx> TEAM:<a.xlsx> TEAM:<b.xlsx> GOOGLE:<c.xlsx> ...  (nhiều phần)
+function parseResultFiles(args: string[]): MergeFileRef[] | null {
+  if (args.length === 0) return null;
+  const tagged = args.every((a) => /^(TEAM|GOOGLE):.+/i.test(a));
+  if (tagged) {
+    return args.map((a) => {
+      const idx = a.indexOf(':');
+      return { kind: a.slice(0, idx).toUpperCase() as 'TEAM' | 'GOOGLE', filePath: a.slice(idx + 1) };
+    });
+  }
+  if (args.length === 2) {
+    return [
+      { kind: 'TEAM', filePath: args[0] },
+      { kind: 'GOOGLE', filePath: args[1] },
+    ];
+  }
+  return null;
+}
+
+const resultFiles = masterXlsxPath ? parseResultFiles(fileArgs) : null;
+
+if (!masterXlsxPath || !resultFiles) {
   console.error(
-    'Cách dùng: npm run merge-risky -- <file-excel-goc.xlsx> <file-ket-qua-TEAM.xlsx> <file-ket-qua-GOOGLE.xlsx>\n\n' +
-      'Dùng khi tool KHÔNG tự ghép được kết quả Risky vào file Excel gốc (vd 2 file kết quả Team/\n' +
-      'Google đã tới Telegram nhưng bị bỏ lỡ không tự bắt được) — ghép TAY bằng đúng logic tự động\n' +
-      '(Safe to Send nếu ít nhất 1 trong 2 file TRUE, Do not Send nếu cả 2 FALSE), áp dụng cho các\n' +
-      'row đang là "Risky" trong file Excel gốc.',
+    'Cách dùng:\n' +
+      '  npm run merge-risky -- <file-excel-goc.xlsx> <file-ket-qua-TEAM.xlsx> <file-ket-qua-GOOGLE.xlsx>\n' +
+      '  npm run merge-risky -- <file-excel-goc.xlsx> TEAM:<file1.xlsx> TEAM:<file2.xlsx> GOOGLE:<file3.xlsx> ...\n\n' +
+      'Dùng khi tool KHÔNG tự ghép được kết quả Risky vào file Excel gốc — ghép TAY bằng đúng logic tự\n' +
+      'động (Safe to Send nếu ít nhất 1 bên TRUE, Do not Send nếu các bên có kết quả đều FALSE), áp\n' +
+      'dụng cho các row đang là "Risky" trong file Excel gốc. Cách thứ 2 dùng khi list bị tách nhiều\n' +
+      'phần, hoặc thiếu kết quả của 1 bên.',
   );
   process.exit(1);
 }
 
 async function main() {
-  const stats = mergeRiskyResultsIntoMaster(masterXlsxPath, [
-    { kind: 'TEAM', filePath: teamFilePath },
-    { kind: 'GOOGLE', filePath: googleFilePath },
-  ]);
+  const stats = mergeRiskyResultsIntoMaster(masterXlsxPath, resultFiles!);
   logger.info('Hoàn tất ghép tay.');
 
   // Gửi luôn lên Telegram giống hệt luồng tự động — khỏi phải tự scp file xuống máy để kiểm tra.

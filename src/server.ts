@@ -622,7 +622,7 @@ function mainJobSteps(job: MainJob): { label: string; state: StepState }[] {
     return 'pending';
   };
   const riskyState: StepState = !risky ? 'pending' : risky.status === 'done' ? 'done' : risky.status === 'error' ? 'failed' : risky.status === 'running' ? 'active' : 'pending';
-  const expected = risky?.result ? risky.result.chunks.length * 2 : 0;
+  const expected = risky?.result ? expectedLots(risky.result) : 0;
   const tgState: StepState =
     risky?.status === 'done' && risky.result === null
       ? 'done'
@@ -692,10 +692,19 @@ ${backLink()}
   return pageLayout(`${jobLabel(job)} — ${BRAND_NAME}`, body, active ? 3 : pipelineActive ? 8 : 0);
 }
 
+// Kết quả cũ (lưu trong lịch sử trước khi có successfulLots/failedLots) coi như mọi lượt thành công.
+function expectedLots(result: RiskyFlowResult): number {
+  return result.successfulLots ?? result.chunks.length * 2;
+}
+
+function failedLots(result: RiskyFlowResult): string[] {
+  return result.failedLots ?? [];
+}
+
 function renderRiskyJob(job: RiskyJob): string {
   // Tổng số kết quả MONG ĐỢI từ Telegram = 2 (TEAM + GOOGLE) cho mỗi phần đã tách.
   const telegramStatus = getJobTelegramStatus(job.id);
-  const expectedTelegramTotal = job.result ? job.result.chunks.length * 2 : 0;
+  const expectedTelegramTotal = job.result ? expectedLots(job.result) : 0;
   const receivedCount = telegramStatus.received.length;
   const telegramAllReceived = expectedTelegramTotal > 0 && receivedCount >= expectedTelegramTotal;
 
@@ -724,11 +733,12 @@ function renderRiskyJob(job: RiskyJob): string {
             (chunk, i) => `
           ${chunks.length > 1 ? `<p class="note" style="margin-bottom:0"><strong>Phần ${i + 1}/${chunks.length}</strong> · ${escapeHtml(path.basename(chunk.excelPath))}</p>` : ''}
           <div class="shots">
-            <div class="shot"><p>Xác nhận upload · TEAM</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" /></div>
-            <div class="shot"><p>Xác nhận upload · GOOGLE</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" /></div>
+            ${chunk.teamResultScreenshot ? `<div class="shot"><p>Xác nhận upload · TEAM</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/team" alt="Kết quả TEAM" /></div>` : `<div class="shot"><p style="color:var(--err)">TEAM · upload thất bại</p></div>`}
+            ${chunk.googleResultScreenshot ? `<div class="shot"><p>Xác nhận upload · GOOGLE</p><img loading="lazy" src="/jobs/${job.id}/screenshot/${i}/google" alt="Kết quả GOOGLE" /></div>` : `<div class="shot"><p style="color:var(--err)">GOOGLE · upload thất bại</p></div>`}
           </div>`,
           )
-          .join('')}`;
+          .join('')}
+        ${failedLots(job.result).length > 0 ? `<div class="banner banner-warn" style="margin-top:16px"><span class="b-ico" style="color:#b57a00">${ICONS.alert}</span><div><strong>${failedLots(job.result).length} lượt upload thất bại sau 3 lần thử: ${escapeHtml(failedLots(job.result).join(', '))}</strong><p>Tool vẫn tự ghép kết quả của các lượt thành công. Lead chỉ thuộc lượt thất bại sẽ giữ nhãn Risky.</p></div></div>` : ''}`;
     }
   }
 
@@ -927,9 +937,9 @@ const server = http.createServer((req, res) => {
         return;
       }
       const filePath = screenshotMatch[3] === 'team' ? chunk.teamResultScreenshot : chunk.googleResultScreenshot;
-      if (!fs.existsSync(filePath)) {
+      if (!filePath || !fs.existsSync(filePath)) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Không tìm thấy ảnh kết quả (có thể server đã khởi động lại).');
+        res.end('Không tìm thấy ảnh kết quả (lượt upload này thất bại, hoặc ảnh đã bị xoá).');
         return;
       }
       res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
