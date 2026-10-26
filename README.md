@@ -135,9 +135,10 @@ Cách khuyến nghị là setup Caddy để có HTTPS thật (xem mục ngay dư
     tự động được đẩy vào ngay khi job Apollo/Debounce tương ứng chạy xong (không cần bấm nút gì
     thêm), và **không chặn** job Apollo/Debounce mới của người khác nữa dù list lớn có thể mất
     hàng giờ để xử lý xong Risky.
-- Nếu 1 list Risky bị tách thành nhiều phần (>1000 lead, giới hạn của meetscript.io), các phần
-  được upload **song song** (tối đa `RISKY_CONCURRENCY` lượt cùng lúc, mặc định 5) thay vì lần
-  lượt — trang trạng thái của job Risky hiển thị tiến trình kiểu "12/60 lượt" theo thời gian thực.
+- Nếu 1 list Risky bị tách thành nhiều phần (>1000 lead, giới hạn của meetscript.io): TEAM và
+  GOOGLE chạy song song, nhưng các phần của **cùng 1 bên chạy lần lượt** — sau mỗi phần nghỉ ngẫu
+  nhiên 60–300 giây rồi bắt cURL mới mới upload phần tiếp theo (upload liền 2 phần cùng 1 bên thì
+  phần sau hỏng). Trang trạng thái job Risky hiển thị tiến trình kiểu "3/6 lượt" theo thời gian thực.
 - Lịch sử job được lưu vào `data/processed/jobs-history.json` nên khởi động lại server **không
   mất lịch sử** nữa. Job đang chạy dở lúc tắt server sẽ hiện trạng thái "Lỗi" (cần chạy lại).
   Trên web có nút **Xoá lịch sử** (xoá mọi job đã xong/lỗi) và nút xoá từng job. Thao tác xoá

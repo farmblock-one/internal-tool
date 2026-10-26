@@ -15,6 +15,7 @@ export const config = {
   // Số tab/task xử lý song song tối đa khi upload các phần (chunk) lên meetscript.io — meetscript.io/
   // Teams/Gmail không giới hạn số request đồng thời từ cùng 1 tài khoản (đã xác nhận), nên chạy song
   // song giúp rút ngắn đáng kể thời gian xử lý list lớn (25-30K lead = 25-30 chunk/50-60 lượt upload).
+  // (Không còn dùng — các phần cùng 1 bên giờ chạy lần lượt, xem risky-pipeline.ts.)
   riskyConcurrency: Number(process.env.RISKY_CONCURRENCY ?? '5'),
   headless: process.env.HEADLESS === 'true',
   get debounceApiKey(): string {

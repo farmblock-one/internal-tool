@@ -39,8 +39,10 @@ export interface RiskyFlowResult {
 // Lượt upload KHÔNG thấy popup xác nhận (= thất bại) thì thử lại, nghỉ tăng dần giữa các lần.
 const UPLOAD_MAX_ATTEMPTS = 3;
 const UPLOAD_RETRY_DELAYS_MS = [60_000, 180_000];
-// Các lượt đầu bắt đầu cách nhau chừng này, không bấm Upload dồn vào cùng 1 lúc.
-const UPLOAD_START_STAGGER_MS = 15_000;
+// Khoảng nghỉ NGẪU NHIÊN giữa 2 phần liên tiếp của CÙNG 1 bên (TEAM hoặc GOOGLE).
+const LANE_GAP_MIN_MS = 60_000;
+const LANE_GAP_MAX_MS = 300_000;
+const randomBetween = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -96,42 +98,12 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-/**
- * Chạy tối đa `limit` task song song cùng lúc (worker-pool: mỗi "worker" tự lấy task tiếp theo
- * ngay khi xong task trước, không đợi cả đợt) — dùng để upload nhiều phần lên meetscript.io đồng
- * thời thay vì xếp hàng lần lượt, tận dụng việc meetscript.io/Teams/Gmail không giới hạn số
- * request đồng thời từ cùng 1 tài khoản (đã xác nhận thực tế).
- */
-async function runWithConcurrency<T>(
-  tasks: Array<() => Promise<T>>,
-  limit: number,
-  onTaskDone?: (done: number, total: number) => void,
-): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
-  let nextIndex = 0;
-  let done = 0;
-
-  async function worker(): Promise<void> {
-    for (;;) {
-      const current = nextIndex++;
-      if (current >= tasks.length) return;
-      results[current] = await tasks[current]();
-      done++;
-      onTaskDone?.(done, tasks.length);
-    }
-  }
-
-  const workerCount = Math.max(1, Math.min(limit, tasks.length));
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
-}
 
 /**
  * Xử lý 1 file Risky: đổi sang Excel (tự tách thành nhiều phần nếu vượt quá 1000 lead/phần —
- * giới hạn của meetscript.io), bắt cURL Teams + Gmail 1 LẦN DUY NHẤT (phiên đăng nhập dùng chung
- * được cho mọi phần đã tách), rồi upload SONG SONG (tối đa `config.riskyConcurrency` lượt cùng
- * lúc, mỗi lượt 1 tab Chrome riêng trong cùng `context`) từng phần lên 2 tab TEAM/GOOGLE của
- * meetscript.io. Trả về `null` nếu file Risky rỗng (không có lead nào).
+ * giới hạn của meetscript.io), bắt cURL Teams + Gmail, rồi upload từng phần lên 2 tab TEAM/GOOGLE
+ * của meetscript.io: 2 bên chạy song song, các phần của cùng 1 bên chạy lần lượt (nghỉ ngẫu nhiên
+ * 60–300s + bắt cURL mới giữa 2 phần). Trả về `null` nếu file Risky rỗng (không có lead nào).
  *
  * `context` do nơi gọi (server.ts hàng đợi Risky riêng, hoặc process-risky.ts) tự mở — dùng
  * profile Chrome RIÊNG (CHROME_USER_DATA_DIR khác với Apollo) để chạy đồng thời với job
@@ -198,8 +170,8 @@ export async function runRiskyFlow(
   if (emailChunks.length > 1) {
     logger.info(
       `File Risky có ${emails.length} lead, vượt giới hạn ${MAX_ROWS_PER_RUN}/lần của meetscript.io — ` +
-        `tự động tách thành ${emailChunks.length} file nhỏ, xử lý song song tối đa ` +
-        `${config.riskyConcurrency} lượt cùng lúc.`,
+        `tự động tách thành ${emailChunks.length} file nhỏ. TEAM và GOOGLE chạy song song; các phần của ` +
+        `cùng 1 bên chạy lần lượt, nghỉ ngẫu nhiên 60–300s và bắt cURL mới giữa 2 phần.`,
     );
   }
 
@@ -257,14 +229,8 @@ export async function runRiskyFlow(
     return excelPath;
   });
 
-  // 2 task (TEAM + GOOGLE) cho mỗi phần đã tách — chạy song song, worker-pool giới hạn
-  // `config.riskyConcurrency` lượt cùng lúc (mỗi lượt = 1 tab Chrome riêng trong cùng context).
-  type UploadTask = { chunkIndex: number; kind: 'TEAM' | 'GOOGLE' };
-  const uploadTasks: UploadTask[] = excelPaths.flatMap((_, chunkIndex) => [
-    { chunkIndex, kind: 'TEAM' as const },
-    { chunkIndex, kind: 'GOOGLE' as const },
-  ]);
-  const totalLots = uploadTasks.length;
+  // 2 lượt (TEAM + GOOGLE) cho mỗi phần đã tách — xem `runLane` bên dưới.
+  const totalLots = excelPaths.length * 2;
 
   // Đăng ký TRƯỚC khi upload (không phải sau) — để dù kết quả Telegram đầu tiên về nhanh tới mấy,
   // `maybeMergeJob` trong telegram-watcher.ts luôn biết tổng số cần đợi + file Excel nào cần cập
@@ -273,38 +239,47 @@ export async function runRiskyFlow(
     registerRiskyJobMeta(jobId, masterXlsxPath, totalLots);
   }
 
-  const screenshots: Array<{ chunkIndex: number; kind: 'TEAM' | 'GOOGLE'; outcome: UploadOutcome }> =
-    await runWithConcurrency(
-      uploadTasks.map((task, taskIndex) => async () => {
-        // Chỉ giãn các lượt ĐẦU TIÊN (khởi động cùng lúc); các lượt sau tự giãn theo lượt trước.
-        if (taskIndex > 0 && taskIndex < config.riskyConcurrency) await sleep(taskIndex * UPLOAD_START_STAGGER_MS);
-        const excelPath = excelPaths[task.chunkIndex];
-        const label = `${task.kind} phần ${task.chunkIndex + 1}/${excelPaths.length}`;
-        let usedVersion = 0;
-        const outcome = await uploadWithRetry(
-          () => {
-            // Luôn lấy cURL MỚI NHẤT tại thời điểm thử (có thể đã được lượt khác bắt lại).
-            const current = curls[task.kind];
-            usedVersion = current.version;
-            return uploadRiskyToMeetscript(liveContext, current.value, excelPath, DOWNLOAD_DIR, task.kind);
-          },
-          label,
-          async () => {
-            await ensureLiveContext();
-            await refreshCurl(task.kind, usedVersion);
-          },
-        );
-        // Đăng ký "sổ chờ" khi đã gửi được (có popup, hoặc đã bấm Upload mà chưa xác nhận) — bộ phận
-        // theo dõi Telegram sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi về.
-        if (outcome.status !== 'failed') registerExpectedTelegramFile(excelPath, task.kind, jobId);
-        return { chunkIndex: task.chunkIndex, kind: task.kind, outcome };
-      }),
-      config.riskyConcurrency,
-      (done, total) => {
-        logger.info(`Đã xong lượt ${done}/${total} upload meetscript.io.`);
-        onProgress?.(done, total);
-      },
-    );
+  // Mỗi bên (TEAM, GOOGLE) là 1 "làn" chạy LẦN LƯỢT từng phần; 2 làn chạy song song với nhau.
+  // Đã xác nhận thực tế: upload liền 2 phần của CÙNG 1 bên là phần sau hỏng. Giữa 2 phần của cùng
+  // 1 bên phải nghỉ ngẫu nhiên 60–300 giây rồi bắt cURL MỚI mới upload phần tiếp theo.
+  let doneLots = 0;
+  const runLane = async (kind: Kind) => {
+    const results: Array<{ chunkIndex: number; kind: Kind; outcome: UploadOutcome }> = [];
+    for (let chunkIndex = 0; chunkIndex < excelPaths.length; chunkIndex++) {
+      const label = `${kind} phần ${chunkIndex + 1}/${excelPaths.length}`;
+      if (chunkIndex > 0) {
+        const waitMs = randomBetween(LANE_GAP_MIN_MS, LANE_GAP_MAX_MS);
+        logger.info(`Lượt ${label}: nghỉ ${Math.round(waitMs / 1000)}s sau phần trước, rồi bắt cURL ${kind} mới...`);
+        await sleep(waitMs);
+        await ensureLiveContext();
+        await refreshCurl(kind, curls[kind].version);
+      }
+      const excelPath = excelPaths[chunkIndex];
+      let usedVersion = 0;
+      const outcome = await uploadWithRetry(
+        () => {
+          const current = curls[kind];
+          usedVersion = current.version;
+          return uploadRiskyToMeetscript(liveContext, current.value, excelPath, DOWNLOAD_DIR, kind);
+        },
+        label,
+        async () => {
+          await ensureLiveContext();
+          await refreshCurl(kind, usedVersion);
+        },
+      );
+      // Đăng ký "sổ chờ" khi đã gửi được (có popup, hoặc đã bấm Upload mà chưa xác nhận) — bộ phận
+      // theo dõi Telegram sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi về.
+      if (outcome.status !== 'failed') registerExpectedTelegramFile(excelPath, kind, jobId);
+      results.push({ chunkIndex, kind, outcome });
+      doneLots++;
+      logger.info(`Đã xong lượt ${doneLots}/${totalLots} upload meetscript.io (${label}).`);
+      onProgress?.(doneLots, totalLots);
+    }
+    return results;
+  };
+  const [teamResults, googleResults] = await Promise.all([runLane('TEAM'), runLane('GOOGLE')]);
+  const screenshots = [...teamResults, ...googleResults];
 
   const lotLabel = (s: { kind: string; chunkIndex: number }) => `${s.kind} phần ${s.chunkIndex + 1}/${excelPaths.length}`;
   const failedLots = screenshots.filter((s) => s.outcome.status === 'failed').map(lotLabel);
