@@ -86,7 +86,22 @@ export async function runFlow(apolloListUrl: string, outputFileName?: string): P
   // bỏ ô trống): Debounce giới hạn file 20 MB, gửi cả file Apollo nhiều cột thì list vài nghìn lead
   // đã vượt (gặp thực tế với list 6k lead). Kết quả Debounce vốn chỉ có các cột của họ (EMAIL,
   // RESULT, REASON...), các cột Apollo được ghép lại theo email ở bước sau (mergeByEmail).
+  // Lấy ĐÚNG cột tên "Email" (trùng khớp hoàn toàn, không phân biệt hoa/thường) — không lấy nhầm
+  // "Email Status", "Secondary Email", "Personal Email"... Kiểm tra thêm nội dung cột thật sự là
+  // email, sai thì dừng luôn để không verify nhầm dữ liệu (tốn credit Debounce thật).
   const emailCol = findColumn(cleanedRows, ['email']);
+  const nonEmpty = cleanedRows.map((r) => String(r[emailCol] ?? '').trim()).filter(Boolean);
+  const looksLikeEmail = nonEmpty.filter((v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)).length;
+  logger.info(
+    `Cột email dùng để verify: "${emailCol}" — ${looksLikeEmail}/${nonEmpty.length} ô đúng định dạng email. ` +
+      `Mẫu: ${nonEmpty.slice(0, 3).join(', ') || '(trống)'}`,
+  );
+  if (nonEmpty.length === 0 || looksLikeEmail / nonEmpty.length < 0.9) {
+    throw new Error(
+      `Cột "${emailCol}" không giống cột email (chỉ ${looksLikeEmail}/${nonEmpty.length} ô đúng định dạng) — ` +
+        `dừng lại, không gửi Debounce. Kiểm tra lại file export: ${rawExportPath}`,
+    );
+  }
   const seen = new Set<string>();
   const emailOnlyRows = cleanedRows
     .map((r) => String(r[emailCol] ?? '').trim())
