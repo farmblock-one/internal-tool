@@ -21,8 +21,22 @@ function safeExec(cmd: string): void {
  */
 export function cleanupChromeProfile(profileDir: string): void {
   const resolved = path.resolve(profileDir);
-  safeExec(`pkill -9 -f "${resolved}"`);
+  safeExec(`pkill -9 -f -- '${profileProcessPattern(profileDir)}'`);
   for (const lockFile of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
     fs.rmSync(path.join(resolved, lockFile), { force: true });
   }
+}
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Mẫu tìm tiến trình Chrome dùng ĐÚNG profile này: tham số `--user-data-dir=<đường dẫn>` phải kết
+ * thúc ngay sau đường dẫn (dấu cách hoặc hết dòng). Trước đây tìm theo kiểu "có chứa chuỗi", nên
+ * dọn profile Apollo (`.chrome-profile`) giết nhầm luôn Chrome của hàng đợi Risky
+ * (`.chrome-profile-risky`) đang chạy song song — đã gặp thực tế: Chrome Risky bị đóng giữa lúc
+ * upload meetscript.io đúng lúc 1 job Apollo khác bắt đầu.
+ */
+export function profileProcessPattern(profileDir: string): string {
+  const variants = [...new Set([path.resolve(profileDir), profileDir])].map(escapeRegex);
+  return `--user-data-dir=(${variants.join('|')})( |$)`;
 }

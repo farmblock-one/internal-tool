@@ -97,10 +97,18 @@ export async function uploadRiskyToMeetscript(
     await uploadBtn.click();
 
     logger.info('Đã bấm Upload Data — đang chờ popup xác nhận (có thể mất tới ~5 phút)...');
+    // Trang/Chrome bị đóng giữa chừng thì popup không bao giờ tới nữa — báo lỗi NGAY thay vì ngồi
+    // chờ đủ 6 phút trên 1 trang đã chết.
+    let timer: NodeJS.Timeout | undefined;
     const dialogMessage = await Promise.race([
       dialogPromise,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 6 * 60_000)),
-    ]);
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), 6 * 60_000);
+      }),
+      new Promise<never>((_, reject) => {
+        page.once('close', () => reject(new Error('Trang meetscript.io (hoặc cả Chrome) bị đóng trong lúc chờ popup xác nhận.')));
+      }),
+    ]).finally(() => clearTimeout(timer));
 
     const resultPath = `${downloadDir}/result-meetscript-${tab.toLowerCase()}-${Date.now()}.png`;
     await page.screenshot({ path: resultPath, fullPage: true }).catch(() => {});

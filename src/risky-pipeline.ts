@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserContext } from 'playwright';
+import { openPersistentChrome } from './browser.js';
 import { readCsv, extractEmails } from './csv-utils.js';
 import { writeRiskyExcel } from './xlsx-utils.js';
 import { fetchTeamsSearchCurl } from './teams.js';
@@ -135,6 +136,39 @@ export async function runRiskyFlow(
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
   fs.mkdirSync(PROCESSED_DIR, { recursive: true });
 
+  // Chrome có thể bị đóng/crash giữa chừng. Theo dõi Chrome đang dùng; khi thử lại mà nó đã chết thì
+  // mở Chrome MỚI (cùng profile Risky), không thử lại trên Chrome đã chết. Chrome mở thêm ở đây
+  // được tự đóng ở cuối hàm; Chrome ban đầu vẫn do nơi gọi tự đóng như cũ.
+  let liveContext = context;
+  let liveClosed = false;
+  const watchClose = (ctx: BrowserContext) => ctx.once('close', () => { if (ctx === liveContext) liveClosed = true; });
+  watchClose(context);
+  const extraContexts: BrowserContext[] = [];
+  let reopening: Promise<void> | undefined;
+  const ensureLiveContext = async (): Promise<void> => {
+    if (!liveClosed) return;
+    if (!reopening) {
+      reopening = (async () => {
+        logger.warn('Chrome của hàng đợi Risky đã bị đóng — mở lại Chrome mới (cùng profile Risky) để thử tiếp...');
+        const fresh = await openPersistentChrome(config.riskyChromeUserDataDir);
+        extraContexts.push(fresh);
+        liveContext = fresh;
+        liveClosed = false;
+        watchClose(fresh);
+      })().finally(() => {
+        reopening = undefined;
+      });
+    }
+    await reopening;
+  };
+
+  try {
+    return await runRiskyFlowInner();
+  } finally {
+    for (const ctx of extraContexts) await ctx.close().catch(() => {});
+  }
+
+  async function runRiskyFlowInner(): Promise<RiskyFlowResult | null> {
   const rows = readCsv(riskyCsvPath);
   const emails = extractEmails(rows);
   if (emails.length === 0) {
@@ -181,7 +215,7 @@ export async function runRiskyFlow(
       entry.refreshing = (async () => {
         try {
           const fresh =
-            kind === 'TEAM' ? await fetchTeamsSearchCurl(context, DOWNLOAD_DIR) : await fetchGmailLookupCurl(context, DOWNLOAD_DIR);
+            kind === 'TEAM' ? await fetchTeamsSearchCurl(liveContext, DOWNLOAD_DIR) : await fetchGmailLookupCurl(liveContext, DOWNLOAD_DIR);
           entry.value = fresh;
           entry.version++;
           const freshPath = path.join(PROCESSED_DIR, `${kind === 'TEAM' ? 'teams' : 'gmail'}-curl-${ts}-v${entry.version}.txt`);
@@ -235,10 +269,13 @@ export async function runRiskyFlow(
             // Luôn lấy cURL MỚI NHẤT tại thời điểm thử (có thể đã được lượt khác bắt lại).
             const current = curls[task.kind];
             usedVersion = current.version;
-            return uploadRiskyToMeetscript(context, current.value, excelPath, DOWNLOAD_DIR, task.kind);
+            return uploadRiskyToMeetscript(liveContext, current.value, excelPath, DOWNLOAD_DIR, task.kind);
           },
           label,
-          () => refreshCurl(task.kind, usedVersion),
+          async () => {
+            await ensureLiveContext();
+            await refreshCurl(task.kind, usedVersion);
+          },
         );
         // Đăng ký "sổ chờ" CHỈ khi upload thành công (có popup xác nhận) — bộ phận theo dõi Telegram
         // sẽ tự nhận diện + tải file kết quả thật khi bot meetscript.io gửi vào group.
@@ -282,4 +319,5 @@ export async function runRiskyFlow(
 
   logger.info(`Hoàn tất xử lý file Risky (${totalLots} lượt upload).`);
   return { chunks, successfulLots, failedLots };
+  }
 }
