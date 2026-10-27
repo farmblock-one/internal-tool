@@ -10,6 +10,12 @@ import { logger } from './logger.js';
 import { captureCrashDiagnostics } from './diagnostics.js';
 
 const DOWNLOAD_DIR = path.resolve('data/downloads');
+
+// Lead có "Email Status" (cột của Apollo) thuộc nhóm này KHÔNG gửi đi lọc, nhưng vẫn giữ trong file cuối.
+export const SKIPPED_EMAIL_STATUSES = ['Unavailable', 'Email no longer valid'];
+
+const hasColumn = (rows: Record<string, string>[], name: string) =>
+  rows.length > 0 && Object.keys(rows[0]).some((c) => c.toLowerCase() === name.toLowerCase());
 const PROCESSED_DIR = path.resolve('data/processed');
 
 for (const dir of [DOWNLOAD_DIR, PROCESSED_DIR]) {
@@ -66,21 +72,22 @@ export async function runFlow(apolloListUrl: string, outputFileName?: string): P
     logger.info(`Tự đặt tên file output theo tên list Apollo: "${listName}" -> "${effectiveOutputFileName}".`);
   }
 
-  // 2.5a. Trước khi gửi qua Debounce, bỏ hẳn các lead có "Email Status" = "Unavailable" hoặc
-  // "Email no longer valid" — Apollo coi như các lead này không có email khả dụng, gửi qua
-  // Debounce verify chỉ tốn request vô ích.
+  // 2.5a. Bỏ 2 cột "Contact Owner" và "Account Owner" khỏi file export. File này giữ TOÀN BỘ lead
+  // (kể cả lead bị bỏ khỏi luồng lọc ở bước dưới) và là nền để ghép ra file Excel cuối.
   const rawRows = readCsv(rawExportPath);
-  const availableRows = dropRowsByColumnValue(rawRows, ['Email Status'], ['Unavailable', 'Email no longer valid']);
-  logger.info(
-    `Đã bỏ ${rawRows.length - availableRows.length} lead có Email Status = Unavailable/Email no longer valid ` +
-      `(còn lại ${availableRows.length}/${rawRows.length}).`,
-  );
-
-  // 2.5b. Bỏ 2 cột "Contact Owner" và "Account Owner" khỏi file export.
-  const cleanedRows = dropColumns(availableRows, ['Contact Owner', 'Account Owner']);
+  const allCleanedRows = dropColumns(rawRows, ['Contact Owner', 'Account Owner']);
   const cleanedExportPath = path.join(PROCESSED_DIR, `apollo-export-cleaned-${Date.now()}.csv`);
-  writeCsv(cleanedExportPath, cleanedRows);
-  logger.info(`Đã xoá cột Contact Owner/Account Owner: ${cleanedExportPath}`);
+  writeCsv(cleanedExportPath, allCleanedRows);
+  logger.info(`Đã xoá cột Contact Owner/Account Owner (giữ đủ ${allCleanedRows.length} lead): ${cleanedExportPath}`);
+
+  // 2.5b. Lead có "Email Status" = "Unavailable" / "Email no longer valid" KHÔNG gửi qua Debounce
+  // (Apollo coi như không có email khả dụng, verify chỉ tốn credit), nhưng VẪN nằm trong file Excel
+  // cuối với RESULT để trống — không bị tách Risky, không bị import đè lên Apollo.
+  const cleanedRows = dropRowsByColumnValue(allCleanedRows, ['Email Status'], SKIPPED_EMAIL_STATUSES);
+  logger.info(
+    `Bỏ ${allCleanedRows.length - cleanedRows.length} lead có Email Status = ${SKIPPED_EMAIL_STATUSES.join('/')} ` +
+      `khỏi luồng lọc (vẫn giữ trong file Excel cuối) — gửi lọc ${cleanedRows.length}/${allCleanedRows.length} lead.`,
+  );
 
   // 3. Verify email qua Debounce -> file có thêm cột RESULT. Chỉ gửi DUY NHẤT cột email (bỏ trùng,
   // bỏ ô trống): Debounce giới hạn file 20 MB, gửi cả file Apollo nhiều cột thì list vài nghìn lead
@@ -115,7 +122,7 @@ export async function runFlow(apolloListUrl: string, outputFileName?: string): P
   );
   const debounceResultPath = await verifyListViaApi(debounceInputPath, PROCESSED_DIR);
 
-  // Truyền thêm `cleanedExportPath` (file Apollo ĐẦY ĐỦ cột đã gửi lên Debounce) để bước sau ghép
+  // Truyền thêm `cleanedExportPath` (file Apollo ĐẦY ĐỦ cột + ĐỦ mọi lead) để bước sau ghép
   // lại đúng theo email — nếu không có file này (vd chạy lại qua `npm run resume` chỉ với file kết
   // quả Debounce), file Excel cuối sẽ chỉ có các cột Debounce trả về, không có cột Apollo gốc.
   return runFromDebounceResult(debounceResultPath, rawExportPath, effectiveOutputFileName, cleanedExportPath);
@@ -161,9 +168,13 @@ export async function runFromDebounceResult(
     // trống trong file Excel, và KHÔNG được import lên Apollo (xem apollo-reimport.ts).
     const apolloEmailCol = findColumn(apolloRows, ['email']);
     const resultEmails = new Set(debounceRows.map((r) => String(r[findColumn(debounceRows, ['email'])] ?? '').trim().toLowerCase()));
+    // Lead bị bỏ khỏi luồng lọc (Email Status Unavailable/...) không gửi Debounce nên không tính.
+    const sentRows = hasColumn(apolloRows, 'Email Status')
+      ? dropRowsByColumnValue(apolloRows, ['Email Status'], SKIPPED_EMAIL_STATUSES)
+      : apolloRows;
     const missing = [
       ...new Set(
-        apolloRows.map((r) => String(r[apolloEmailCol] ?? '').trim().toLowerCase()).filter((e) => e && !resultEmails.has(e)),
+        sentRows.map((r) => String(r[apolloEmailCol] ?? '').trim().toLowerCase()).filter((e) => e && !resultEmails.has(e)),
       ),
     ];
     if (missing.length > 0) {

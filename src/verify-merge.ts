@@ -87,6 +87,9 @@ if (cellMismatchCount === 0) {
 let same = 0;
 let riskyResolved = 0;
 let noEmail = 0;
+let skippedOk = 0;
+const SKIPPED = ['unavailable', 'email no longer valid'];
+const statusCol = Object.keys(finalRows[0] ?? {}).find((c) => c.toLowerCase() === 'email status');
 const notInDebounce: string[] = [];
 const wrong: string[] = [];
 const byFinalValue = new Map<string, number>();
@@ -100,6 +103,12 @@ for (let i = 0; i < finalRows.length; i++) {
     continue;
   }
   const debounceResult = debounceByEmail.get(email);
+  const emailStatus = statusCol ? norm(row[statusCol]).toLowerCase() : '';
+  if (debounceResult === undefined && SKIPPED.includes(emailStatus)) {
+    if (finalResult === '') skippedOk++;
+    else wrong.push(`   dòng ${i + 2}: ${email} — lead không gửi lọc (Email Status "${norm(row[statusCol!])}") nhưng RESULT="${finalResult}"`);
+    continue;
+  }
   if (debounceResult === undefined) {
     notInDebounce.push(`   dòng ${i + 2}: ${email} (RESULT trong Excel: "${finalResult}")`);
     continue;
@@ -115,6 +124,7 @@ for (let i = 0; i < finalRows.length; i++) {
 
 console.log(`✅ ${same} lead có RESULT đúng y kết quả Debounce`);
 console.log(`✅ ${riskyResolved} lead Risky đã được cập nhật thành Safe to Send/Do not Send (kết quả Teams/Google)`);
+if (skippedOk > 0) console.log(`✅ ${skippedOk} lead Email Status = Unavailable/Email no longer valid: không gửi lọc, có trong file, RESULT để trống`);
 if (noEmail > 0) console.log(`ℹ️  ${noEmail} lead không có email (không gửi Debounce, RESULT để trống là đúng)`);
 if (notInDebounce.length > 0) {
   problems++;
