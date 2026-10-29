@@ -139,6 +139,10 @@ Cách khuyến nghị là setup Caddy để có HTTPS thật (xem mục ngay dư
   GOOGLE chạy song song, nhưng các phần của **cùng 1 bên chạy lần lượt** — sau mỗi phần nghỉ ngẫu
   nhiên 60–300 giây rồi bắt cURL mới mới upload phần tiếp theo (upload liền 2 phần cùng 1 bên thì
   phần sau hỏng). Trang trạng thái job Risky hiển thị tiến trình kiểu "3/6 lượt" theo thời gian thực.
+- Hàng chờ list Apollo tối đa **10 list đang chờ** (không tính list đang chạy); đầy thì web báo lỗi khi
+  nhập thêm. Trang job có nút **Huỷ list** (xác nhận 2 lần) cho list đang chờ hoặc đang ở bước export
+  Apollo / lọc Debounce. Khởi động lại server: list đang chờ được xếp lại vào hàng đợi, list đang chạy
+  dở bị đánh dấu Lỗi. Thời gian chờ Debounce tối đa 3 tiếng.
 - Lịch sử job được lưu vào `data/processed/jobs-history.json` nên khởi động lại server **không
   mất lịch sử** nữa. Job đang chạy dở lúc tắt server sẽ hiện trạng thái "Lỗi" (cần chạy lại).
   Trên web có nút **Xoá lịch sử** (xoá mọi job đã xong/lỗi) và nút xoá từng job. Thao tác xoá

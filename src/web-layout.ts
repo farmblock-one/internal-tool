@@ -193,6 +193,10 @@ html.is-ready .reveal { animation: none; }
 .chip-running i { animation: pulse-dot 1.4s infinite; }
 .chip-done { background: #e3f6ee; color: var(--ok); }
 .chip-error { background: #fdeaea; color: var(--err); }
+.chip-cancelled { background: #eceff3; color: #5b6878; text-decoration: line-through; text-decoration-thickness: 1px; }
+.queue-pos { display: inline-flex; align-items: center; gap: 6px; font-size: .74rem; font-weight: 700; color: var(--nsc-dark); background: #e2f3fa; padding: 4px 10px; border-radius: 999px; }
+@keyframes shake { 0%, 100% { transform: none; } 20%, 60% { transform: translateX(-6px); } 40%, 80% { transform: translateX(6px); } }
+.dlg.shake { animation: shake .4s ease; }
 .tag { display: inline-block; padding: 3px 9px; border-radius: 7px; font-size: .66rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .tag-main { background: #e2f3fa; color: var(--nsc-dark); }
 .tag-risky { background: #fff0de; color: #a85b00; }
@@ -392,7 +396,11 @@ const SCRIPT = `
       const dlg = document.getElementById('confirm-dlg');
       dlg.querySelector('h3').textContent = opener.dataset.title || 'Xác nhận';
       dlg.querySelector('p').textContent = opener.dataset.confirm;
+      dlg.querySelector('[data-dlg-ok]').textContent = opener.dataset.okLabel || 'Xoá';
       dlg._action = opener.dataset.action; dlg._row = opener.closest('.job-row');
+      // Thao tác nguy hiểm (huỷ job) cần xác nhận LẦN 2 với nội dung + nút khác.
+      dlg._confirm2 = opener.dataset.confirm2 ? { title: opener.dataset.title2, text: opener.dataset.confirm2, ok: opener.dataset.ok2Label } : null;
+      dlg._stage2 = false;
       dlg.showModal();
       return;
     }
@@ -400,16 +408,25 @@ const SCRIPT = `
     const ok = e.target.closest('[data-dlg-ok]');
     if (ok) {
       const dlg = document.getElementById('confirm-dlg');
+      if (dlg._confirm2 && !dlg._stage2) {
+        dlg._stage2 = true;
+        dlg.querySelector('h3').textContent = dlg._confirm2.title || 'Xác nhận lần 2';
+        dlg.querySelector('p').textContent = dlg._confirm2.text;
+        ok.textContent = dlg._confirm2.ok || 'Chắc chắn';
+        const box = dlg.querySelector('.dlg');
+        box.classList.remove('shake'); void box.offsetWidth; box.classList.add('shake');
+        return;
+      }
       dlg.close();
       const row = dlg._row;
       try {
         const res = await fetch(dlg._action, { method: 'POST', headers: { 'X-Requested-With': 'fetch' } });
-        if (!res.ok) throw new Error();
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { toast(data.message || 'Thao tác không thành công'); return; }
         if (data.redirect) { location.href = data.redirect; return; }
-        if (row) { row.classList.add('leaving'); setTimeout(() => refresh(true), 350); } else { await refresh(true); }
+        if (row && !dlg._confirm2) { row.classList.add('leaving'); setTimeout(() => refresh(true), 350); } else { await refresh(true); }
         toast(data.message || 'Đã xoá');
-      } catch { toast('Xoá không thành công'); }
+      } catch { toast('Thao tác không thành công'); }
       return;
     }
     if (e.target.closest('[data-dlg-cancel]')) document.getElementById('confirm-dlg').close();

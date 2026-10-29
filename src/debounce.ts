@@ -3,12 +3,15 @@ import path from 'node:path';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { servePubliclyOnOwnServer } from './file-server.js';
+import { cancellableSleep, throwIfCancelled } from './cancel.js';
 
 // Xác nhận từ tài liệu chính thức (developers.debounce.com/api-reference):
 // GET /v1/upload/?api=KEY&url=<https url tới file .csv/.txt do bạn tự host>
 // GET /v1/status/?api=KEY&list_id=<id>
 const BULK_UPLOAD_URL = 'https://bulk.debounce.io/v1/upload/';
 const BULK_STATUS_URL = 'https://bulk.debounce.io/v1/status/';
+// Thời gian tối đa chờ Debounce xử lý xong 1 list.
+const DEBOUNCE_MAX_WAIT_MS = 3 * 60 * 60_000;
 
 interface DebounceUploadResponse {
   debounce: { list_id: string; list_name: string };
@@ -20,12 +23,13 @@ interface DebounceStatusResponse {
   success: string;
 }
 
-export async function verifyListViaApi(csvFilePath: string, outputDir: string): Promise<string> {
+export async function verifyListViaApi(csvFilePath: string, outputDir: string, signal?: AbortSignal): Promise<string> {
   const apiKey = config.debounceApiKey;
 
   // Debounce KHÔNG nhận upload trực tiếp — yêu cầu 1 URL https trỏ tới file host trên "server
   // của chính bạn" (không chấp nhận Google Drive/Dropbox...). Mở thẳng 1 HTTPS server tạm trên
   // IP của chính VM này (xem README phần PUBLIC_HOST / FILE_SERVE_PORT).
+  throwIfCancelled(signal);
   logger.info('Đang mở server tạm thời để host file CSV công khai cho Debounce tải về...');
   const publicFile = await servePubliclyOnOwnServer(csvFilePath);
 
@@ -42,14 +46,15 @@ export async function verifyListViaApi(csvFilePath: string, outputDir: string): 
     }
     logger.info(`Đã upload lên Debounce, list_id=${listId}. Đang chờ xử lý...`);
 
-    // Poll trạng thái tới khi xử lý xong (tối đa 2 tiếng — đã xác nhận thực tế có lúc Debounce xử
+    // Poll trạng thái tới khi xử lý xong (tối đa 3 tiếng — đã xác nhận thực tế có lúc Debounce xử
     // lý chậm hơn hẳn mức thường thấy, mà vẫn chạy xong thật chứ không hề kẹt hẳn).
     let downloadLink = '';
     let lastStatus = '';
-    const deadline = Date.now() + 2 * 60 * 60_000;
+    const deadline = Date.now() + DEBOUNCE_MAX_WAIT_MS;
 
     while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      // Bị huỷ từ web UI thì dừng ngay, không đợi hết lượt poll.
+      await cancellableSleep(15_000, signal);
       const statusUrl = `${BULK_STATUS_URL}?api=${encodeURIComponent(apiKey)}&list_id=${encodeURIComponent(listId)}`;
 
       // ⚠️ Đã xác nhận thực tế: thỉnh thoảng (hiếm) Debounce trả về response rỗng/không phải JSON
@@ -57,7 +62,7 @@ export async function verifyListViaApi(csvFilePath: string, outputDir: string): 
       // cho từng lượt poll, 1 lần trục trặc thoáng qua như vậy sẽ làm crash LUÔN cả job (dù
       // Debounce vẫn tiếp tục chạy thật ở phía họ, để lại 1 list "mồ côi" không ai theo dõi nữa).
       // Coi lượt poll lỗi như 1 lượt "chưa có kết quả" bình thường — thử lại ở lượt kế tiếp, chỉ
-      // thật sự báo lỗi nếu hết hẳn 2 tiếng mà CHƯA LẦN NÀO đọc được "completed".
+      // thật sự báo lỗi nếu hết hẳn 3 tiếng mà CHƯA LẦN NÀO đọc được "completed".
       let statusJson: DebounceStatusResponse;
       try {
         const statusRes = await fetch(statusUrl);
@@ -82,7 +87,7 @@ export async function verifyListViaApi(csvFilePath: string, outputDir: string): 
 
     if (!downloadLink) {
       throw new Error(
-        `Debounce xử lý quá 2 tiếng hoặc chưa có download_link (trạng thái cuối: "${lastStatus}") — kiểm tra thủ công tại app.debounce.io.`,
+        `Debounce xử lý quá ${DEBOUNCE_MAX_WAIT_MS / 3_600_000} tiếng hoặc chưa có download_link (trạng thái cuối: "${lastStatus}") — kiểm tra thủ công tại app.debounce.io.`,
       );
     }
 

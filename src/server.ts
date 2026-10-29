@@ -14,6 +14,7 @@ import {
 } from './telegram-watcher.js';
 import { runApolloReimport } from './apollo-reimport.js';
 import { jobContext } from './job-context.js';
+import { JobCancelledError } from './cancel.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { BRAND_NAME, escapeHtml, pageLayout } from './web-layout.js';
@@ -21,7 +22,7 @@ import { BRAND_NAME, escapeHtml, pageLayout } from './web-layout.js';
 const PROCESSED_DIR = path.resolve('data/processed');
 const ASSETS_DIR = path.resolve('assets');
 
-type JobStatus = 'queued' | 'running' | 'done' | 'error';
+type JobStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled';
 
 interface MainJob {
   kind: 'main';
@@ -41,6 +42,8 @@ interface MainJob {
   // vào HÀNG ĐỢI RIÊNG (xem RiskyJob) — để trang trạng thái của job này có thể dẫn sang theo dõi
   // tiếp tiến trình Risky (vẫn 1 luồng liền mạch, không cần bấm nút nào thêm).
   riskyJobId?: string;
+  // Thời điểm có người bấm huỷ (để hiện "Đang dừng..." trong lúc chờ luồng dừng hẳn).
+  cancelRequestedAt?: number;
 }
 
 interface RiskyJob {
@@ -107,18 +110,22 @@ function scheduleSave(): void {
   if (!saveTimer) saveTimer = setTimeout(saveJobsNow, 1000);
 }
 
+const requeueAfterRestart: Job[] = [];
+
 function loadJobs(): void {
   if (!fs.existsSync(HISTORY_FILE)) return;
   try {
     const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')) as Job[];
     for (const job of data) {
       if (!job || typeof job.id !== 'string' || !Array.isArray(job.logs)) continue;
-      if (job.status === 'queued' || job.status === 'running') {
+      if (job.status === 'running') {
         job.status = 'error';
-        job.error = 'Server đã khởi động lại khi job này đang chạy/đang chờ. Hãy chạy lại nếu cần.';
+        job.error = 'Server đã khởi động lại khi job này đang chạy. Hãy chạy lại nếu cần.';
         job.finishedAt = job.finishedAt ?? Date.now();
       }
       jobs.set(job.id, job);
+      // Job còn đang CHỜ (chưa chạy, chưa tốn gì) thì xếp lại vào hàng đợi như cũ, không bỏ.
+      if (job.status === 'queued') requeueAfterRestart.push(job);
     }
     logger.info(`Đã nạp ${jobs.size} job từ lịch sử: ${HISTORY_FILE}`);
   } catch (err) {
@@ -157,6 +164,52 @@ const mainQueue: string[] = [];
 let mainProcessing = false;
 const riskyQueue: string[] = [];
 let riskyProcessing = false;
+
+// Tối đa chừng này list Apollo ĐANG CHỜ (không tính list đang chạy). Nhập thêm khi đầy thì báo lỗi.
+const MAX_QUEUED_MAIN_JOBS = 10;
+// AbortController của job Apollo/Debounce đang chạy — dùng để huỷ từ web UI. Không lưu xuống đĩa.
+const runningControllers = new Map<string, AbortController>();
+
+function queuedMainCount(): number {
+  return [...jobs.values()].filter((j) => j.kind === 'main' && j.status === 'queued').length;
+}
+
+/** Vị trí (1, 2, 3...) của job trong hàng đợi Apollo, hoặc 0 nếu không đang chờ. */
+function queuePosition(job: Job): number {
+  if (job.status !== 'queued') return 0;
+  if (job.kind === 'risky') return riskyQueue.indexOf(job.id) + 1;
+  return mainQueue.indexOf(job.id) + 1;
+}
+
+/**
+ * Huỷ 1 job Apollo/Debounce: đang chờ thì bỏ khỏi hàng đợi; đang chạy (bước export Apollo hoặc
+ * chờ Debounce) thì gửi tín hiệu dừng — luồng tự dừng ở điểm an toàn gần nhất (vài giây).
+ */
+function cancelMainJob(id: string): { ok: boolean; message: string } {
+  const job = jobs.get(id);
+  if (!job || job.kind !== 'main') return { ok: false, message: 'Không tìm thấy job Apollo này.' };
+  if (job.status === 'queued') {
+    const idx = mainQueue.indexOf(id);
+    if (idx !== -1) mainQueue.splice(idx, 1);
+    job.status = 'cancelled';
+    job.finishedAt = Date.now();
+    job.logs.push(`[${new Date().toISOString()}] Đã huỷ khi đang chờ trong hàng đợi (chưa chạy gì).`);
+    saveJobsNow();
+    return { ok: true, message: 'Đã huỷ list đang chờ' };
+  }
+  if (job.status === 'running') {
+    const controller = runningControllers.get(id);
+    if (!controller) return { ok: false, message: 'Job đã qua bước lọc Debounce, không huỷ được nữa.' };
+    if (!controller.signal.aborted) {
+      job.cancelRequestedAt = Date.now();
+      job.logs.push(`[${new Date().toISOString()}] Có yêu cầu huỷ — đang dừng...`);
+      controller.abort();
+      scheduleSave();
+    }
+    return { ok: true, message: 'Đang dừng list, vài giây nữa sẽ xong' };
+  }
+  return { ok: false, message: 'Job này đã kết thúc, không cần huỷ.' };
+}
 
 function isRiskyJob(job: Job): job is RiskyJob {
   return job.kind === 'risky';
@@ -223,7 +276,17 @@ async function processMainQueue(): Promise<void> {
       await jobContext.run({ append: (line) => { job.logs.push(line); scheduleSave(); } }, async () => {
         try {
           if (job.kind === 'main') {
-            job.result = await runFlow(job.listUrl);
+            const controller = new AbortController();
+            runningControllers.set(job.id, controller);
+            try {
+              job.result = await runFlow(job.listUrl, undefined, controller.signal);
+            } finally {
+              // Qua khỏi bước Debounce là hết huỷ được — các bước sau chỉ vài giây.
+              runningControllers.delete(job.id);
+            }
+            if (controller.signal.aborted) {
+              logger.warn('Yêu cầu huỷ tới lúc job đã lọc xong Debounce — vẫn hoàn tất bình thường.');
+            }
             // Tên file (và tên hiển thị trên web UI) giờ lấy từ chính tên file Excel thật đã tạo
             // (tự đặt theo tên list Apollo — xem runFlow/sanitizeToFileName), không còn do người
             // dùng tự gõ nữa, nên chỉ biết được SAU KHI export xong.
@@ -238,9 +301,14 @@ async function processMainQueue(): Promise<void> {
           }
           job.status = 'done';
         } catch (err) {
-          job.status = 'error';
-          job.error = err instanceof Error ? err.message : String(err);
-          logger.error(`Job ${job.kind === 'main' ? 'Apollo/Debounce' : 'import lại Apollo'} lỗi:`, err);
+          if (err instanceof JobCancelledError) {
+            job.status = 'cancelled';
+            logger.warn('Đã huỷ list theo yêu cầu. Lưu ý: nếu đã gửi lên Debounce thì Debounce vẫn xử lý xong phía họ.');
+          } else {
+            job.status = 'error';
+            job.error = err instanceof Error ? err.message : String(err);
+            logger.error(`Job ${job.kind === 'main' ? 'Apollo/Debounce' : 'import lại Apollo'} lỗi:`, err);
+          }
         } finally {
           job.finishedAt = Date.now();
           scheduleSave();
@@ -335,13 +403,24 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   running: 'Đang chạy',
   done: 'Hoàn tất',
   error: 'Lỗi',
+  cancelled: 'Đã huỷ',
 };
+
+/** Chữ phụ cạnh trạng thái: vị trí trong hàng đợi, "đang dừng", tiến trình upload Risky. */
+function jobChipExtra(job: Job): string {
+  const pos = queuePosition(job);
+  if (pos > 0) return `#${pos} trong hàng chờ`;
+  if (job.kind === 'main' && job.status === 'running' && job.cancelRequestedAt) return 'đang dừng...';
+  if (isRiskyJob(job) && job.status === 'running' && job.progress) return `${job.progress} lượt`;
+  return '';
+}
 
 function statusChip(status: JobStatus, extra = ''): string {
   return `<span class="chip chip-${status}"><i></i>${STATUS_LABEL[status]}${extra ? ` · ${escapeHtml(extra)}` : ''}</span>`;
 }
 
 const ICONS = {
+  stop: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>',
   apollo: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>',
   verify: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>',
   risky: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>',
@@ -416,7 +495,7 @@ function renderTelegramBanner(): string {
 }
 
 function renderHistoryRow(j: Job): string {
-  const progress = isRiskyJob(j) && j.status === 'running' && j.progress ? `${j.progress} lượt` : '';
+  const progress = jobChipExtra(j);
   const del = isActive(j)
     ? '<span style="width:32px"></span>'
     : `<button class="icon-btn" type="button" title="Xoá khỏi lịch sử"
@@ -457,11 +536,11 @@ function renderHome(errorMessage?: string): string {
               ${activeJobs
                 .map(
                   (j) =>
-                    `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> <span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span> ${statusChip(j.status, isRiskyJob(j) && j.progress ? `${j.progress}` : '')}</li>`,
+                    `<li><a href="/jobs/${j.id}">${escapeHtml(jobLabel(j))}</a> <span class="tag ${jobTagClass(j)}">${jobTagLabel(j)}</span> ${statusChip(j.status, jobChipExtra(j))}</li>`,
                 )
                 .join('')}
             </ul>
-            <p>Mỗi hàng đợi (Apollo/Debounce và Risky) chạy 1 job một lúc, nhưng 2 hàng đợi chạy song song với nhau.</p>
+            <p>Các list Apollo chạy lần lượt từng list một. Hàng chờ đang có <b>${queuedMainCount()}/${MAX_QUEUED_MAIN_JOBS}</b> list. Phần Risky chạy song song ở hàng đợi riêng.</p>
           </div>
         </div>`
       : '';
@@ -576,9 +655,28 @@ function timingMeta(job: Job): [string, string][] {
   return items;
 }
 
+/** Nút huỷ cho job Apollo/Debounce đang chờ hoặc đang chạy (chưa qua bước Debounce). Cần xác nhận 2 lần. */
+function cancelButton(job: Job): string {
+  if (job.kind !== 'main') return '';
+  const canCancel = job.status === 'queued' || (job.status === 'running' && runningControllers.has(job.id) && !job.cancelRequestedAt);
+  if (!canCancel) return '';
+  const label = escapeHtml(jobLabel(job));
+  const first =
+    job.status === 'queued'
+      ? `List “${label}” đang chờ trong hàng đợi. Huỷ thì list sẽ bị bỏ khỏi hàng chờ.`
+      : `List “${label}” đang chạy (export Apollo / lọc Debounce). Huỷ thì tool dừng ngay, không tạo file kết quả.`;
+  const second =
+    job.status === 'queued'
+      ? 'Xác nhận lần 2: huỷ list này? Muốn chạy lại thì phải nhập lại link từ đầu.'
+      : 'Xác nhận lần 2: huỷ list này? Nếu list đã gửi lên Debounce thì credit Debounce vẫn bị tính, và phải chạy lại từ đầu.';
+  return `<button class="btn btn-danger" type="button" data-title="Huỷ list này?" data-confirm="${escapeHtml(first)}"
+      data-ok-label="Huỷ list" data-title2="Bạn chắc chắn muốn huỷ?" data-confirm2="${escapeHtml(second)}" data-ok2-label="Chắc chắn, huỷ list"
+      data-action="/jobs/${job.id}/cancel">${ICONS.stop} Huỷ list</button>`;
+}
+
 function detailHead(job: Job, extraChip = ''): string {
   const del = isActive(job)
-    ? ''
+    ? cancelButton(job)
     : `<button class="btn btn-danger" type="button" data-title="Xoá job này?"
          data-confirm="Job sẽ bị xoá khỏi lịch sử. File kết quả trên server vẫn được giữ nguyên."
          data-action="/jobs/${job.id}/delete">${ICONS.trash} Xoá</button>`;
@@ -586,13 +684,16 @@ function detailHead(job: Job, extraChip = ''): string {
     ${jobIcon(job)}
     <div class="grow">
       <h1>${escapeHtml(jobLabel(job))}</h1>
-      <div class="sub"><span class="tag ${jobTagClass(job)}">${jobTagLabel(job)}</span>${statusChip(job.status, extraChip)}</div>
+      <div class="sub"><span class="tag ${jobTagClass(job)}">${jobTagLabel(job)}</span>${statusChip(job.status, extraChip || jobChipExtra(job))}</div>
     </div>
     ${del}
   </div>`;
 }
 
 function errorBlockFor(job: Job): string {
+  if (job.status === 'cancelled') {
+    return `<div class="banner banner-warn" style="margin:20px 0 0"><span class="b-ico" style="color:#5b6878">${ICONS.stop}</span><div><strong>List đã bị huỷ</strong><p>Không tạo file kết quả. Muốn chạy lại thì nhập lại link List Apollo ở trang chủ.</p></div></div>`;
+  }
   return job.status === 'error'
     ? `<div class="banner banner-err" style="margin:20px 0 0"><span class="b-ico" style="color:var(--err)">${ICONS.alert}</span><div><strong>Lỗi</strong><p style="color:inherit">${escapeHtml(job.error ?? '')}</p></div></div>`
     : '';
@@ -618,7 +719,7 @@ function mainJobSteps(job: MainJob): { label: string; state: StepState }[] {
 
   const s = (i: number): StepState => {
     if (i < mainIdx) return 'done';
-    if (i === mainIdx) return job.status === 'error' ? 'failed' : job.status === 'running' ? 'active' : 'pending';
+    if (i === mainIdx) return job.status === 'error' || job.status === 'cancelled' ? 'failed' : job.status === 'running' ? 'active' : 'pending';
     return 'pending';
   };
   const riskyState: StepState = !risky ? 'pending' : risky.status === 'done' ? 'done' : risky.status === 'error' ? 'failed' : risky.status === 'running' ? 'active' : 'pending';
@@ -865,6 +966,12 @@ const server = http.createServer((req, res) => {
         res.end();
         return;
       }
+      if (queuedMainCount() >= MAX_QUEUED_MAIN_JOBS) {
+        const msg = `Hàng chờ đã đầy (${MAX_QUEUED_MAIN_JOBS} list đang chờ). Vui lòng đợi bớt list rồi thử lại.`;
+        res.writeHead(303, { Location: `/?error=${encodeURIComponent(msg)}` });
+        res.end();
+        return;
+      }
       const job = enqueueMainJob(listUrl);
       res.writeHead(303, { Location: `/jobs/${job.id}` });
       res.end();
@@ -874,6 +981,14 @@ const server = http.createServer((req, res) => {
     if (req.method === 'POST' && url.pathname === '/jobs/clear') {
       const removed = clearFinishedJobs();
       sendJson(res, { ok: true, message: `Đã xoá ${removed} job khỏi lịch sử` });
+      return;
+    }
+
+    const cancelMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/cancel$/);
+    if (req.method === 'POST' && cancelMatch) {
+      const result = cancelMainJob(cancelMatch[1]);
+      res.writeHead(result.ok ? 200 : 409, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(result));
       return;
     }
 
@@ -961,6 +1076,14 @@ const server = http.createServer((req, res) => {
 
 fs.mkdirSync(PROCESSED_DIR, { recursive: true });
 loadJobs();
+for (const job of requeueAfterRestart.sort((a, b) => a.createdAt - b.createdAt)) {
+  (job.kind === 'risky' ? riskyQueue : mainQueue).push(job.id);
+}
+if (requeueAfterRestart.length > 0) {
+  logger.info(`Xếp lại ${requeueAfterRestart.length} job đang chờ từ trước khi khởi động lại vào hàng đợi.`);
+  void processMainQueue();
+  void processRiskyQueue();
+}
 
 // Ghi lịch sử lần cuối trước khi tắt (systemd restart gửi SIGTERM).
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

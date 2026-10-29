@@ -8,6 +8,7 @@ import { writeRowsAsXlsx } from './xlsx-utils.js';
 import { buildOutputXlsxPath, sanitizeToFileName } from './filename-utils.js';
 import { logger } from './logger.js';
 import { captureCrashDiagnostics } from './diagnostics.js';
+import { JobCancelledError, throwIfCancelled } from './cancel.js';
 
 const DOWNLOAD_DIR = path.resolve('data/downloads');
 
@@ -34,14 +35,19 @@ export interface FlowResult {
  * không ổn định, không phải lúc nào cũng xảy ra). Thay vì để cả luồng dừng hẳn, thử lại từ đầu
  * bước export (mở context mới) tối đa `maxAttempts` lần trước khi thật sự báo lỗi.
  */
-async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts = 3): Promise<ExportListResult> {
+async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts = 3, signal?: AbortSignal): Promise<ExportListResult> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    throwIfCancelled(signal);
     const context = await openPersistentChrome();
+    // Bị huỷ từ web UI giữa lúc export: đóng Chrome ngay, mọi thao tác Apollo đang chờ sẽ dừng theo.
+    const onAbort = () => void context.close().catch(() => {});
+    signal?.addEventListener('abort', onAbort, { once: true });
     try {
       if (attempt > 1) logger.warn(`Thử lại export Apollo — lần ${attempt}/${maxAttempts}...`);
       return await exportListEmails(context, listUrl, downloadDir);
     } catch (err) {
+      if (signal?.aborted) throw new JobCancelledError();
       // Bị đăng xuất Apollo thì thử lại bao nhiêu lần cũng vậy — dừng luôn.
       if (err instanceof ApolloLoggedOutError) throw err;
       lastErr = err;
@@ -53,15 +59,21 @@ async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts
         logger.warn(`Không chụp được thông tin chẩn đoán: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`);
       }
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       await context.close().catch(() => {});
     }
   }
   throw lastErr;
 }
 
-export async function runFlow(apolloListUrl: string, outputFileName?: string): Promise<FlowResult> {
+/**
+ * `signal`: huỷ từ web UI. Chỉ có tác dụng ở bước export Apollo + lọc Debounce; qua khỏi bước
+ * Debounce (ghép file, tách Risky — chỉ vài giây) thì luồng chạy nốt cho xong.
+ */
+export async function runFlow(apolloListUrl: string, outputFileName?: string, signal?: AbortSignal): Promise<FlowResult> {
   // 1-2. Apollo: xoá filter, chọn tất cả, export email -> tải file CSV thô (tự thử lại nếu Chrome crash)
-  const { filePath: rawExportPath, listName } = await exportWithRetry(apolloListUrl, DOWNLOAD_DIR);
+  const { filePath: rawExportPath, listName } = await exportWithRetry(apolloListUrl, DOWNLOAD_DIR, 3, signal);
+  throwIfCancelled(signal);
 
   // Không có tên do người dùng tự nhập (web UI giờ không còn ô này nữa) -> tự đặt tên file theo
   // ĐÚNG tên list Apollo thật (đã dò được lúc export, xem `detectApolloListName` trong apollo.ts),
@@ -120,7 +132,8 @@ export async function runFlow(apolloListUrl: string, outputFileName?: string): P
     `Đã tạo file chỉ gồm cột email để gửi Debounce: ${emailOnlyRows.length} email ` +
       `(từ ${cleanedRows.length} lead, đã bỏ trùng/ô trống) — ${(fs.statSync(debounceInputPath).size / 1024).toFixed(0)} KB.`,
   );
-  const debounceResultPath = await verifyListViaApi(debounceInputPath, PROCESSED_DIR);
+  const debounceResultPath = await verifyListViaApi(debounceInputPath, PROCESSED_DIR, signal);
+  throwIfCancelled(signal);
 
   // Truyền thêm `cleanedExportPath` (file Apollo ĐẦY ĐỦ cột + ĐỦ mọi lead) để bước sau ghép
   // lại đúng theo email — nếu không có file này (vd chạy lại qua `npm run resume` chỉ với file kết
