@@ -604,7 +604,7 @@ ${errorBanner}
   ${stat('ok', 'Hoàn tất', doneCount)}
   ${stat('err', 'Lỗi', errorCount)}
 </div>
-<div class="section-head reveal d3">
+<div class="section-head reveal d3" id="history-head" style="scroll-margin-top:84px">
   <h2>Lịch sử chạy</h2>
   <span class="spacer"></span>
   <div class="tabs">
@@ -616,6 +616,7 @@ ${errorBanner}
   <span data-live="clear">${clearBtn}</span>
 </div>
 <div class="card jobs reveal d4" data-live="history">${history}</div>
+<nav class="pager reveal d5" id="pager" aria-label="Phân trang lịch sử"></nav>
 `;
   return pageLayout(BRAND_NAME, body, refreshSeconds);
 }

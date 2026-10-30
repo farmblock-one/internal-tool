@@ -217,6 +217,24 @@ html.is-ready .reveal { animation: none; }
 .job-row:hover { background: #f7fbfd; }
 .job-row.leaving { opacity: 0; transform: translateX(24px); }
 .job-row[hidden] { display: none; }
+@keyframes row-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.job-row.page-in { animation: row-in .4s var(--ease) backwards; }
+
+/* Phân trang lịch sử */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; flex-wrap: wrap; min-height: 38px; }
+.pager-info { font-size: .8rem; color: var(--ink-3); }
+.pager-info b { color: var(--ink-2); font-weight: 700; }
+.pager-nav { display: flex; align-items: center; gap: 6px; }
+.pg-btn {
+  min-width: 38px; height: 38px; padding: 0 12px; border-radius: 11px; border: 1px solid var(--line);
+  background: #fff; color: var(--ink-2); font: inherit; font-size: .82rem; font-weight: 600; cursor: pointer;
+  font-variant-numeric: tabular-nums; transition: all .25s var(--ease);
+}
+.pg-btn:hover:not(:disabled):not(.on) { border-color: var(--nsc-light); color: var(--nsc-dark); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.pg-btn.on { background: linear-gradient(135deg, var(--nsc-light), var(--nsc-dark)); color: #fff; border-color: transparent; box-shadow: 0 6px 16px -8px rgba(0,129,187,.8); cursor: default; }
+.pg-btn:disabled { opacity: .4; cursor: default; }
+.pg-gap { color: var(--ink-3); padding: 0 2px; font-weight: 600; }
+.pg-mobile { display: none; font-size: .82rem; font-weight: 700; color: var(--ink-2); padding: 0 6px; font-variant-numeric: tabular-nums; }
 .job-main { min-width: 0; display: flex; align-items: center; gap: 14px; }
 .job-ico { width: 40px; height: 40px; flex-shrink: 0; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(135deg, rgba(54,195,220,.16), rgba(0,129,187,.12)); color: var(--nsc-dark); }
 .job-ico.risky { background: #fff3e4; color: #c06d00; }
@@ -328,6 +346,10 @@ dialog.confirm::backdrop { background: rgba(4, 24, 43, .45); backdrop-filter: bl
   .stats { grid-template-columns: repeat(2, 1fr); }
   .job-row { grid-template-columns: 1fr auto auto; gap: 10px; padding: 14px 14px; }
   .job-row .job-time { display: none; }
+  .pager { justify-content: center; }
+  .pager-nav { width: 100%; justify-content: space-between; }
+  .pager-nav .pg-btn.num, .pager-nav .pg-gap { display: none; }
+  .pg-mobile { display: inline; }
   .detail { padding: 22px 18px; }
   .meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .meta-grid .meta:first-child { grid-column: 1 / -1; }
@@ -367,9 +389,55 @@ const SCRIPT = `
 
   let filter = 'all';
   try { filter = localStorage.getItem('nsc-filter') || 'all'; } catch {}
-  const applyFilter = () => {
+  // Phân trang lịch sử: 10 job/trang, kết hợp với bộ lọc loại job. Trang hiện tại giữ nguyên khi
+  // danh sách tự cập nhật; đổi bộ lọc thì về trang 1.
+  const PAGE_SIZE = 10;
+  let page = 1;
+  const pageList = (cur, total) => {
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    const keep = new Set([1, total, cur - 1, cur, cur + 1]);
+    if (cur <= 3) [2, 3, 4].forEach((n) => keep.add(n));
+    if (cur >= total - 2) [total - 3, total - 2, total - 1].forEach((n) => keep.add(n));
+    const nums = [...keep].filter((n) => n >= 1 && n <= total).sort((a, b) => a - b);
+    const out = [];
+    nums.forEach((n, i) => { if (i > 0 && n - nums[i - 1] > 1) out.push('…'); out.push(n); });
+    return out;
+  };
+  const renderPager = (total, pages, start, shown) => {
+    const el = document.getElementById('pager');
+    if (!el) return;
+    if (total === 0) {
+      el.innerHTML = document.querySelector('.job-row') ? '<span class="pager-info">Không có job nào thuộc loại này.</span>' : '';
+      return;
+    }
+    const info = '<span class="pager-info">Hiển thị <b>' + (start + 1) + '–' + (start + shown) + '</b> / <b>' + total + '</b> job</span>';
+    if (pages <= 1) { el.innerHTML = info; return; }
+    const btn = (label, target, extra, disabled) =>
+      '<button type="button" class="pg-btn ' + extra + '" data-page="' + target + '"' + (disabled ? ' disabled' : '') + '>' + label + '</button>';
+    const nums = pageList(page, pages).map((n) =>
+      n === '…' ? '<span class="pg-gap">…</span>' : btn(n, n, 'num' + (n === page ? ' on' : ''), false)).join('');
+    el.innerHTML = info + '<div class="pager-nav">' +
+      btn('‹ Trước', page - 1, 'nav', page === 1) + nums +
+      '<span class="pg-mobile">' + page + ' / ' + pages + '</span>' +
+      btn('Sau ›', page + 1, 'nav', page === pages) + '</div>';
+  };
+  const applyFilter = (animate) => {
     document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.f === filter));
-    document.querySelectorAll('.job-row').forEach((r) => { r.hidden = filter !== 'all' && r.dataset.kind !== filter; });
+    const rows = [...document.querySelectorAll('.job-row')];
+    const matched = rows.filter((r) => filter === 'all' || r.dataset.kind === filter);
+    const pages = Math.max(1, Math.ceil(matched.length / PAGE_SIZE));
+    page = Math.min(Math.max(1, page), pages);
+    const start = (page - 1) * PAGE_SIZE;
+    const visible = matched.slice(start, start + PAGE_SIZE);
+    rows.forEach((r) => { r.hidden = !visible.includes(r); r.classList.remove('page-in'); });
+    if (animate) visible.forEach((r, i) => { r.style.animationDelay = (i * 25) + 'ms'; r.classList.add('page-in'); });
+    renderPager(matched.length, pages, start, visible.length);
+  };
+  const goToPage = (n) => {
+    page = n;
+    applyFilter(true);
+    const head = document.getElementById('history-head');
+    if (head && head.getBoundingClientRect().top < 70) head.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   const stickLog = () => {
@@ -381,7 +449,10 @@ const SCRIPT = `
 
   document.addEventListener('click', async (e) => {
     const tab = e.target.closest('.tabs button');
-    if (tab) { filter = tab.dataset.f; try { localStorage.setItem('nsc-filter', filter); } catch {} applyFilter(); return; }
+    if (tab) { filter = tab.dataset.f; try { localStorage.setItem('nsc-filter', filter); } catch {} page = 1; applyFilter(true); return; }
+
+    const pg = e.target.closest('.pg-btn');
+    if (pg && !pg.disabled) { goToPage(Number(pg.dataset.page)); return; }
 
     const copy = e.target.closest('[data-copy-log]');
     if (copy) {
