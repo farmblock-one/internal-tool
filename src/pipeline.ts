@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openPersistentChrome } from './browser.js';
-import { exportListEmails, ApolloLoggedOutError, type ExportListResult } from './apollo.js';
+import { exportListEmails, ApolloLoggedOutError, ApolloExportTimeoutError, type ExportListResult } from './apollo.js';
 import { verifyListViaApi } from './debounce.js';
 import { readCsv, writeCsv, filterByResult, dropColumns, dropRowsByColumnValue, mergeByEmail, findColumn, dedupeDebounceResults } from './csv-utils.js';
 import { writeRowsAsXlsx } from './xlsx-utils.js';
@@ -50,6 +50,8 @@ async function exportWithRetry(listUrl: string, downloadDir: string, maxAttempts
       if (signal?.aborted) throw new JobCancelledError();
       // Bị đăng xuất Apollo thì thử lại bao nhiêu lần cũng vậy — dừng luôn.
       if (err instanceof ApolloLoggedOutError) throw err;
+      // Apollo đã nhận yêu cầu export nhưng chậm — export lại chỉ tạo thêm yêu cầu mới, tốn credit.
+      if (err instanceof ApolloExportTimeoutError) throw err;
       lastErr = err;
       logger.warn(`Export Apollo lần ${attempt} thất bại: ${err instanceof Error ? err.message : String(err)}`);
       try {

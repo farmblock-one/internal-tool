@@ -302,6 +302,24 @@ async function assertApolloLoggedIn(page: Page): Promise<void> {
   }
 }
 
+/**
+ * Apollo đã nhận yêu cầu export nhưng chưa xử lý xong trong thời gian chờ. KHÔNG thử export lại:
+ * mỗi lần bấm Export là 1 yêu cầu export mới trên Apollo (có thể tốn thêm export credit) trong khi
+ * yêu cầu cũ vẫn đang chạy.
+ */
+export class ApolloExportTimeoutError extends Error {
+  constructor(minutes: number) {
+    super(
+      `Chờ quá ${minutes} phút mà Apollo vẫn chưa xử lý xong export — không export lại để tránh tốn thêm credit. ` +
+        'Kiểm tra trên Apollo; khi export đã xong thì chạy lại list.',
+    );
+    this.name = 'ApolloExportTimeoutError';
+  }
+}
+
+// Thời gian tối đa chờ Apollo xử lý xong 1 lần export (list lớn có lúc mất hơn 5 phút).
+const EXPORT_MAX_WAIT_MS = 20 * 60_000;
+
 async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: string): Promise<ExportListResult> {
   logger.info(`Mở list Apollo: ${listUrl}`);
   await page.goto(listUrl, { waitUntil: 'domcontentloaded' });
@@ -440,8 +458,15 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
   });
 
   const downloadBtn = page.getByRole('button', { name: /^download$/i }).first();
-  const exportDeadline = Date.now() + 5 * 60_000;
+  const exportStartedAt = Date.now();
+  const exportDeadline = exportStartedAt + EXPORT_MAX_WAIT_MS;
+  let nextProgressLogAt = exportStartedAt + 2 * 60_000;
   while (Date.now() < exportDeadline && !capturedCsvUrl) {
+    // Ghi log mỗi 2 phút để trang job thấy là tool vẫn đang chờ, không bị treo.
+    if (Date.now() >= nextProgressLogAt) {
+      logger.info(`Vẫn đang chờ Apollo xử lý export... (đã ${Math.round((Date.now() - exportStartedAt) / 60_000)}/${EXPORT_MAX_WAIT_MS / 60_000} phút)`);
+      nextProgressLogAt += 2 * 60_000;
+    }
     if (page.isClosed()) {
       throw new Error('Trang/browser đã đóng đột ngột trong lúc chờ Apollo xử lý export (trước khi bắt được link CSV).');
     }
@@ -457,7 +482,7 @@ async function exportListEmailsInner(page: Page, listUrl: string, downloadDir: s
     }
   }
   if (!capturedCsvUrl) {
-    throw new Error('Chờ quá 5 phút mà không bắt được link file CSV thật — kiểm tra thủ công tại Apollo.');
+    throw new ApolloExportTimeoutError(EXPORT_MAX_WAIT_MS / 60_000);
   }
 
   logger.info('Đã bắt được link file CSV thật, đang tự tải bằng Node (không qua Chrome)...');
