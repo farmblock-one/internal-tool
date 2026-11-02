@@ -874,7 +874,13 @@ function renderRiskyJob(job: RiskyJob): string {
     }
     if (telegramStatus.received.length > 0) {
       telegramBlock += `<div class="note"><ul>${telegramStatus.received
-        .map((r) => `<li>${escapeHtml(r.fileName)} (${r.kind}) · ${fmtTime(r.receivedAt)}</li>`)
+        .map((r) => {
+          const short = r.total !== undefined && r.found !== undefined && r.found < r.total;
+          const cov = r.total !== undefined && r.found !== undefined
+            ? ` · <span style="color:${short ? 'var(--err)' : 'var(--ok)'};font-weight:600">${r.found}/${r.total} email${short ? ` (thiếu ${r.total - r.found})` : ''}</span>`
+            : '';
+          return `<li>${escapeHtml(r.fileName)} (${r.kind}) · ${fmtTime(r.receivedAt)}${cov}</li>`;
+        })
         .join('')}</ul></div>`;
     }
     if (telegramStatus.mergeStatus === 'done') {

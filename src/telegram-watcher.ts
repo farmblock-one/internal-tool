@@ -51,6 +51,10 @@ interface ReceivedEntry {
   kind: ResultKind;
   fileName: string;
   receivedAt: number;
+  // Số email của phần đó CÓ kết quả trong file / tổng số email đã gửi lên cho phần đó. Thiếu =
+  // meetscript.io xử lý chưa xong đã gửi file (đã gặp thực tế: TEAM chỉ có 765/1000, cắt ở cuối).
+  found?: number;
+  total?: number;
 }
 
 type MergeStatus = 'pending' | 'done' | 'error';
@@ -353,15 +357,37 @@ async function handleMessage(message: Api.Message, chatId: string | undefined): 
  * Ghi nhận 1 file kết quả đã lưu vào RESULTS_DIR cho 1 mục chờ (dùng chung cho file nhận qua
  * Telegram và file người dùng tải lên tay): bỏ mục chờ, cộng vào tiến trình job, đủ thì tự ghép.
  */
+/** Đếm bao nhiêu email của phần đã gửi lên có kết quả trong file nhận về; cảnh báo nếu thiếu. */
+function checkResultCoverage(entry: PendingEntry, fileName: string): { found?: number; total?: number } {
+  try {
+    const results = readMeetscriptResultSheet(path.join(RESULTS_DIR, fileName));
+    const partEmails = readXlsxRows(entry.excelPath, 'Risky')
+      .map((r) => String(r.EMAIL ?? '').trim().toLowerCase())
+      .filter(Boolean);
+    const found = partEmails.filter((e) => results.has(e)).length;
+    if (found < partEmails.length) {
+      logger.warn(
+        `File kết quả ${entry.kind} của ${path.basename(entry.excelPath)} CHƯA ĐỦ: chỉ ${found}/${partEmails.length} email có kết quả ` +
+          `(meetscript.io có thể dừng giữa chừng). ${partEmails.length - found} email thiếu sẽ chỉ dựa vào kết quả bên còn lại.`,
+      );
+    }
+    return { found, total: partEmails.length };
+  } catch (err) {
+    logger.warn(`Không kiểm tra được độ đầy đủ của file kết quả ${fileName}: ${err instanceof Error ? err.message : String(err)}`);
+    return {};
+  }
+}
+
 async function recordReceivedResult(entry: PendingEntry, fileName: string): Promise<void> {
   const idx = pending.indexOf(entry);
   if (idx !== -1) {
     pending.splice(idx, 1);
     savePending();
   }
+  const coverage = checkResultCoverage(entry, fileName);
   if (entry.jobId) {
     const list = receivedByJob.get(entry.jobId) ?? [];
-    list.push({ kind: entry.kind, fileName, receivedAt: Date.now() });
+    list.push({ kind: entry.kind, fileName, receivedAt: Date.now(), ...coverage });
     receivedByJob.set(entry.jobId, list);
     saveJobsState();
     await maybeMergeJob(entry.jobId);
@@ -410,14 +436,19 @@ export async function acceptManualResult(
     const partEmails = readXlsxRows(entry.excelPath, 'Risky')
       .map((r) => String(r.EMAIL ?? '').trim().toLowerCase())
       .filter(Boolean);
-    const matched = partEmails.filter((e) => results.has(e)).length;
-    if (partEmails.length > 0 && matched / partEmails.length < 0.8) {
+    // Đối chiếu theo email CỦA FILE: phần lớn phải thuộc phần đang chờ (chặn nhầm phần/nhầm list).
+    // Không đòi file đủ mọi email của phần — file meetscript.io trả về có thể bị cắt giữa chừng.
+    const partSet = new Set(partEmails);
+    const fileEmails = [...results.keys()];
+    const inPart = fileEmails.filter((e) => partSet.has(e)).length;
+    if (partEmails.length > 0 && inPart / fileEmails.length < 0.9) {
       fs.rmSync(savedPath, { force: true });
       return {
         ok: false,
-        message: `File không khớp phần ${path.basename(entry.excelPath)}: chỉ ${matched}/${partEmails.length} email trùng. Có thể nhầm phần hoặc nhầm list.`,
+        message: `File không thuộc phần ${path.basename(entry.excelPath)}: chỉ ${inPart}/${fileEmails.length} email trong file là của phần này. Có thể nhầm phần hoặc nhầm list.`,
       };
     }
+    const matched = partEmails.filter((e) => results.has(e)).length;
     logger.info(`File tải lên tay khớp ${matched}/${partEmails.length} email của ${path.basename(entry.excelPath)}.`);
   } catch (err) {
     logger.warn(`Không đọc được file phần gốc để đối chiếu email (${entry.excelPath}) — vẫn nhận file: ${err instanceof Error ? err.message : String(err)}`);
@@ -532,6 +563,13 @@ export async function sendDocumentToTelegram(filePath: string, caption: string):
  * vào file Excel gốc (xem `mergeRiskyResultsIntoMaster`). Chỉ chạy đúng 1 lần cho mỗi job
  * (`mergeStatus` đổi từ 'pending' ngay khi bắt đầu chạy, dù thành công hay lỗi).
  */
+/** Tóm tắt các file kết quả bị thiếu email, để ghi kèm khi gửi file cuối vào Telegram. */
+function incompleteSummary(received: ReceivedEntry[]): string {
+  const short = received.filter((r) => r.total !== undefined && r.found !== undefined && r.found < r.total);
+  if (short.length === 0) return '';
+  return '\n⚠️ File kết quả chưa đủ: ' + short.map((r) => `${r.fileName.replace(/\.xlsx$/i, '')} ${r.found}/${r.total}`).join(', ');
+}
+
 // server.ts đăng ký: cho biết log của 1 job Risky cần ghi vào đâu (để log bước ghép/gửi Telegram/
 // upload Drive hiện trên trang job, không chỉ nằm trong log hệ thống).
 let jobLogSinkResolver: ((jobId: string) => JobLogSink | undefined) | undefined;
@@ -590,7 +628,8 @@ async function maybeMergeJobInner(jobId: string): Promise<void> {
     meta.telegramCaption =
       `✅ Đã cập nhật kết quả Risky: ${stats.updatedCount} lead (Safe to Send/Do not Send)` +
       (stats.noMatchCount > 0 ? `, ${stats.noMatchCount} lead chưa khớp được kết quả (vẫn giữ "Risky", cần kiểm tra tay)` : '') +
-      '.';
+      '.' +
+      incompleteSummary(received);
     await sendFinalToTelegram(meta);
 
     // Upload luôn file Excel cuối (đã có đủ Safe to Send/Do not Send) lên Google Drive — tự bỏ qua
