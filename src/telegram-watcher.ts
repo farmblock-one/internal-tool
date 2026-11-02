@@ -8,6 +8,7 @@ import { config } from './config.js';
 import { logger } from './logger.js';
 import { mergeRiskyResultsIntoMaster, type MergeFileRef } from './risky-merge.js';
 import { uploadFinalXlsxToDrive } from './drive.js';
+import { readMeetscriptResultSheet, readXlsxRows } from './xlsx-utils.js';
 
 // ⚠️ Đã xác nhận thực tế trên VM: fetch tới api.telegram.org thỉnh thoảng thất bại ngay lúc MỞ
 // KẾT NỐI (AggregateError ETIMEDOUT từ node:net internalConnectMultiple) — Node mặc định thử
@@ -332,18 +333,89 @@ async function handleMessage(message: Api.Message, chatId: string | undefined): 
     fs.mkdirSync(RESULTS_DIR, { recursive: true });
     fs.writeFileSync(path.join(RESULTS_DIR, fileName), buffer);
     logger.info(`Đã nhận + tải kết quả Telegram (${entry.kind}) cho ${path.basename(entry.excelPath)}: ${fileName}`);
-    if (entry.jobId) {
-      const list = receivedByJob.get(entry.jobId) ?? [];
-      list.push({ kind: entry.kind, fileName, receivedAt: Date.now() });
-      receivedByJob.set(entry.jobId, list);
-      saveJobsState();
-      await maybeMergeJob(entry.jobId);
-    }
-    pending.splice(matchIndex, 1);
-    savePending();
+    await recordReceivedResult(entry, fileName);
   } catch (err) {
     logger.error(`Lỗi khi tải file Telegram "${fileName}":`, err);
   }
+}
+
+/**
+ * Ghi nhận 1 file kết quả đã lưu vào RESULTS_DIR cho 1 mục chờ (dùng chung cho file nhận qua
+ * Telegram và file người dùng tải lên tay): bỏ mục chờ, cộng vào tiến trình job, đủ thì tự ghép.
+ */
+async function recordReceivedResult(entry: PendingEntry, fileName: string): Promise<void> {
+  const idx = pending.indexOf(entry);
+  if (idx !== -1) {
+    pending.splice(idx, 1);
+    savePending();
+  }
+  if (entry.jobId) {
+    const list = receivedByJob.get(entry.jobId) ?? [];
+    list.push({ kind: entry.kind, fileName, receivedAt: Date.now() });
+    receivedByJob.set(entry.jobId, list);
+    saveJobsState();
+    await maybeMergeJob(entry.jobId);
+  }
+}
+
+/**
+ * Người dùng tự tải lên file kết quả (khi bot Telegram trả quá lâu nhưng đã có file trong tay).
+ * Kiểm tra kỹ trước khi nhận: đúng định dạng kết quả meetscript.io, tên file không ghi nhầm loại
+ * TEAM/GOOGLE, và email trong file khớp với phần đang chờ (tránh tải nhầm file của phần/list khác).
+ */
+export async function acceptManualResult(
+  excelPath: string,
+  kind: string,
+  originalName: string,
+  data: Buffer,
+): Promise<{ ok: boolean; message: string }> {
+  const entry = pending.find((e) => e.excelPath === excelPath && e.kind === kind);
+  if (!entry) return { ok: false, message: 'Không còn mục chờ này (có thể file vừa về qua Telegram).' };
+
+  const otherKind = entry.kind === 'TEAM' ? 'GOOGLE' : 'TEAM';
+  if (new RegExp(`_${otherKind}\\b`, 'i').test(originalName) && !new RegExp(`_${entry.kind}\\b`, 'i').test(originalName)) {
+    return { ok: false, message: `Tên file "${originalName}" là kết quả ${otherKind}, nhưng mục này đang chờ ${entry.kind}.` };
+  }
+
+  fs.mkdirSync(RESULTS_DIR, { recursive: true });
+  const fileName = `${path.basename(entry.excelPath, '.xlsx')}_${entry.kind}_manual-${Date.now()}.xlsx`;
+  const savedPath = path.join(RESULTS_DIR, fileName);
+  fs.writeFileSync(savedPath, data);
+
+  let results: Map<string, boolean>;
+  try {
+    results = readMeetscriptResultSheet(savedPath);
+  } catch (err) {
+    fs.rmSync(savedPath, { force: true });
+    logger.warn(`File tải lên tay không đọc được: ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, message: 'File không đúng định dạng kết quả meetscript.io (phải là file .xlsx bot gửi về, có sheet "Sheet2").' };
+  }
+  if (results.size === 0) {
+    fs.rmSync(savedPath, { force: true });
+    return { ok: false, message: 'File kết quả không có dòng email nào.' };
+  }
+
+  // Email của phần đang chờ (file Excel tool đã upload lên meetscript.io, sheet "Risky", cột EMAIL).
+  try {
+    const partEmails = readXlsxRows(entry.excelPath, 'Risky')
+      .map((r) => String(r.EMAIL ?? '').trim().toLowerCase())
+      .filter(Boolean);
+    const matched = partEmails.filter((e) => results.has(e)).length;
+    if (partEmails.length > 0 && matched / partEmails.length < 0.8) {
+      fs.rmSync(savedPath, { force: true });
+      return {
+        ok: false,
+        message: `File không khớp phần ${path.basename(entry.excelPath)}: chỉ ${matched}/${partEmails.length} email trùng. Có thể nhầm phần hoặc nhầm list.`,
+      };
+    }
+    logger.info(`File tải lên tay khớp ${matched}/${partEmails.length} email của ${path.basename(entry.excelPath)}.`);
+  } catch (err) {
+    logger.warn(`Không đọc được file phần gốc để đối chiếu email (${entry.excelPath}) — vẫn nhận file: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  logger.info(`Đã nhận file kết quả ${entry.kind} tải lên tay cho ${path.basename(entry.excelPath)}: "${originalName}" -> ${fileName}`);
+  await recordReceivedResult(entry, fileName);
+  return { ok: true, message: `Đã nhận file ${entry.kind} cho ${path.basename(entry.excelPath)}` };
 }
 
 /**

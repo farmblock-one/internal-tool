@@ -10,6 +10,7 @@ import {
   getTelegramWatchStatus,
   getJobTelegramStatus,
   dismissPendingEntry,
+  acceptManualResult,
   setOnMergeComplete,
 } from './telegram-watcher.js';
 import { runApolloReimport } from './apollo-reimport.js';
@@ -461,6 +462,13 @@ function isActive(job: Job): boolean {
   return job.status === 'queued' || job.status === 'running';
 }
 
+/** Nút tải lên tay file kết quả TEAM/GOOGLE cho 1 mục đang chờ bot Telegram. */
+function uploadResultButton(excelPath: string, kind: string): string {
+  const action = `/telegram-pending/upload?excelPath=${encodeURIComponent(excelPath)}&kind=${encodeURIComponent(kind)}`;
+  return `<button type="button" class="mini-btn mini-btn-primary" data-upload-action="${escapeHtml(action)}"
+      title="Đã có file kết quả ${escapeHtml(kind)} trong tay? Tải lên để tool chạy tiếp ngay">⬆ Tải file lên</button>`;
+}
+
 function renderTelegramBanner(): string {
   const status = getTelegramWatchStatus();
   if (status.pending.length === 0) return '';
@@ -478,6 +486,7 @@ function renderTelegramBanner(): string {
                    <input type="hidden" name="kind" value="${escapeHtml(e.kind)}" />
                    <button type="submit" class="mini-btn">Bỏ qua</button>
                  </form>
+                 ${uploadResultButton(e.excelPath, e.kind)}
                </li>`,
              )
              .join('')}
@@ -852,6 +861,15 @@ function renderRiskyJob(job: RiskyJob): string {
       telegramAllReceived ? ' · đã nhận đủ.' : ' · đang chờ phần còn lại (bot meetscript.io có thể mất 1-2 tiếng).'
     }</p>
     <div class="progress det" style="margin-top:8px"><span class="bar" style="width:${pct}%"></span></div>`;
+    const waitingEntries = getTelegramWatchStatus().pending.filter((e) => e.jobId === job.id);
+    if (waitingEntries.length > 0) {
+      telegramBlock += `<div class="note"><strong>Đang chờ ${waitingEntries.length} file</strong> · nếu đã có file kết quả trong tay, bấm “Tải file lên” để tool chạy tiếp ngay:<ul>${waitingEntries
+        .map(
+          (e) =>
+            `<li>${escapeHtml(path.basename(e.excelPath))} (${e.kind}) · đã chờ ${Math.round((Date.now() - e.registeredAt) / 60_000)} phút ${uploadResultButton(e.excelPath, e.kind)}</li>`,
+        )
+        .join('')}</ul></div>`;
+    }
     if (telegramStatus.received.length > 0) {
       telegramBlock += `<div class="note"><ul>${telegramStatus.received
         .map((r) => `<li>${escapeHtml(r.fileName)} (${r.kind}) · ${fmtTime(r.receivedAt)}</li>`)
@@ -923,6 +941,30 @@ function sendJson(res: http.ServerResponse, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
+function sendJsonStatus(res: http.ServerResponse, status: number, data: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(data));
+}
+
+/** Đọc toàn bộ body dạng nhị phân (file tải lên), từ chối nếu vượt `maxBytes`. */
+function readRequestBuffer(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error(`File quá lớn (tối đa ${Math.round(maxBytes / 1024 / 1024)} MB).`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 function readRequestBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -982,6 +1024,22 @@ const server = http.createServer((req, res) => {
     if (req.method === 'POST' && url.pathname === '/jobs/clear') {
       const removed = clearFinishedJobs();
       sendJson(res, { ok: true, message: `Đã xoá ${removed} job khỏi lịch sử` });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/telegram-pending/upload') {
+      const excelPath = url.searchParams.get('excelPath') ?? '';
+      const kind = url.searchParams.get('kind') ?? '';
+      const originalName = decodeURIComponent(String(req.headers['x-file-name'] ?? 'file.xlsx'));
+      let data: Buffer;
+      try {
+        data = await readRequestBuffer(req, 25 * 1024 * 1024);
+      } catch (err) {
+        sendJsonStatus(res, 413, { ok: false, message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      const result = await acceptManualResult(excelPath, kind, originalName, data);
+      sendJsonStatus(res, result.ok ? 200 : 400, result);
       return;
     }
 

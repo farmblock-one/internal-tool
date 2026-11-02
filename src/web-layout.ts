@@ -255,7 +255,10 @@ html.is-ready .reveal { animation: none; }
 .banner-warn { background: #fff8e8; border-color: #f4dfae; }
 .banner-err { background: #fff2f2; border-color: #f3caca; color: #a12b2b; }
 .banner .b-ico { flex-shrink: 0; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: #fff; box-shadow: var(--shadow-sm); }
-.mini-btn { margin-left: 6px; padding: 2px 9px; font-size: .72rem; font-weight: 600; background: #fff; color: #a85b00; border: 1px solid #e0b46a; border-radius: 6px; cursor: pointer; }
+.mini-btn { margin-left: 6px; padding: 2px 9px; font-size: .72rem; font-weight: 600; background: #fff; color: #a85b00; border: 1px solid #e0b46a; border-radius: 6px; cursor: pointer; font-family: inherit; transition: all .2s; }
+.mini-btn-primary { color: #fff; background: linear-gradient(135deg, var(--nsc-light), var(--nsc-dark)); border-color: transparent; }
+.mini-btn-primary:hover { box-shadow: 0 4px 12px -4px rgba(0,129,187,.7); transform: translateY(-1px); }
+.mini-btn.busy { opacity: .6; pointer-events: none; }
 
 /* ---------- Job detail ---------- */
 .back { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 16px; font-size: .85rem; color: var(--ink-2); }
@@ -368,7 +371,7 @@ const SCRIPT = `
     let t = document.querySelector('.toast');
     if (!t) { t = document.createElement('div'); t.className = 'toast'; document.body.appendChild(t); }
     t.textContent = msg; t.classList.add('show');
-    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2400);
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), Math.max(2400, msg.length * 70));
   };
 
   const countUp = (scope) => {
@@ -453,6 +456,32 @@ const SCRIPT = `
 
     const pg = e.target.closest('.pg-btn');
     if (pg && !pg.disabled) { goToPage(Number(pg.dataset.page)); return; }
+
+    // Tải lên tay file kết quả TEAM/GOOGLE cho 1 mục đang chờ bot Telegram.
+    const up = e.target.closest('[data-upload-action]');
+    if (up) {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.xlsx';
+      input.onchange = async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        up.classList.add('busy'); up.textContent = 'Đang tải lên...';
+        try {
+          const res = await fetch(up.dataset.uploadAction, {
+            method: 'POST',
+            headers: { 'X-File-Name': encodeURIComponent(file.name), 'Content-Type': 'application/octet-stream' },
+            body: file,
+          });
+          const data = await res.json().catch(() => ({}));
+          toast(data.message || (res.ok ? 'Đã nhận file' : 'Tải lên không thành công'));
+          if (res.ok) await refresh(true);
+        } catch { toast('Tải lên không thành công'); }
+        up.classList.remove('busy'); up.textContent = '⬆ Tải file lên';
+      };
+      input.click();
+      return;
+    }
 
     const copy = e.target.closest('[data-copy-log]');
     if (copy) {
