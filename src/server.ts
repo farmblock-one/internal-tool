@@ -11,6 +11,8 @@ import {
   getJobTelegramStatus,
   dismissPendingEntry,
   acceptManualResult,
+  setJobLogSinkResolver,
+  resendFinalToTelegram,
   setOnMergeComplete,
 } from './telegram-watcher.js';
 import { runApolloReimport } from './apollo-reimport.js';
@@ -877,6 +879,16 @@ function renderRiskyJob(job: RiskyJob): string {
     }
     if (telegramStatus.mergeStatus === 'done') {
       telegramBlock += `<p class="note ok"><strong>Đã tự động cập nhật cột RESULT (Safe to Send/Do not Send) trong file Excel gốc.</strong> Tải lại file ở trang job Apollo để xem bản mới nhất.</p>`;
+      const resendBtn = `<button class="btn" type="button" style="margin-left:8px" data-title="Gửi lại file cuối?"
+          data-confirm="Gửi lại file Excel cuối của list này vào group Telegram." data-ok-label="Gửi lại"
+          data-action="/jobs/${job.id}/resend-telegram">${ICONS.mail} Gửi lại vào Telegram</button>`;
+      if (telegramStatus.telegramSentAt) {
+        telegramBlock += `<p class="note ok">Đã gửi file cuối vào group Telegram lúc ${fmtTime(telegramStatus.telegramSentAt)}. ${resendBtn}</p>`;
+      } else if (telegramStatus.telegramSendError) {
+        telegramBlock += `<div class="banner banner-err" style="margin-top:14px"><span class="b-ico" style="color:var(--err)">${ICONS.alert}</span><div><strong>Chưa gửi được file cuối vào group Telegram</strong><p style="color:inherit">${escapeHtml(telegramStatus.telegramSendError)}</p><div style="margin-top:10px">${resendBtn}</div></div></div>`;
+      } else {
+        telegramBlock += `<p class="note">Chưa có thông tin gửi file cuối vào Telegram (job chạy trước bản cập nhật này). ${resendBtn}</p>`;
+      }
     } else if (telegramStatus.mergeStatus === 'error') {
       telegramBlock += `<div class="banner banner-err" style="margin-top:14px"><span class="b-ico" style="color:var(--err)">${ICONS.alert}</span><div><strong>Lỗi khi tự động cập nhật file Excel gốc</strong><p style="color:inherit">${escapeHtml(telegramStatus.mergeError ?? '')}<br/>Cần ghép tay. Các file kết quả Team/Google vẫn tải về bình thường.</p></div></div>`;
     }
@@ -1043,6 +1055,13 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    const resendMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/resend-telegram$/);
+    if (req.method === 'POST' && resendMatch) {
+      const result = await resendFinalToTelegram(resendMatch[1]);
+      sendJsonStatus(res, result.ok ? 200 : 400, result);
+      return;
+    }
+
     const cancelMatch = url.pathname.match(/^\/jobs\/([a-f0-9]+)\/cancel$/);
     if (req.method === 'POST' && cancelMatch) {
       const result = cancelMainJob(cancelMatch[1]);
@@ -1154,6 +1173,13 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 
 // Ngay khi ghép xong kết quả Risky (telegram-watcher.ts, độc lập không cần Chrome) — xếp tiếp job
 // import ngược lại Apollo vào hàng đợi DÙNG CHUNG Chrome profile Apollo (xem enqueueReimportJob).
+// Log bước ghép kết quả / gửi Telegram / upload Drive (chạy ngoài hàng đợi) ghi thẳng vào trang job Risky.
+setJobLogSinkResolver((jobId) => {
+  const job = jobs.get(jobId);
+  if (!job) return undefined;
+  return { append: (line) => { job.logs.push(line); scheduleSave(); } };
+});
+
 setOnMergeComplete((masterXlsxPath) => {
   enqueueReimportJob(masterXlsxPath);
 });

@@ -9,6 +9,7 @@ import { logger } from './logger.js';
 import { mergeRiskyResultsIntoMaster, type MergeFileRef } from './risky-merge.js';
 import { uploadFinalXlsxToDrive } from './drive.js';
 import { readMeetscriptResultSheet, readXlsxRows } from './xlsx-utils.js';
+import { jobContext, type JobLogSink } from './job-context.js';
 
 // ⚠️ Đã xác nhận thực tế trên VM: fetch tới api.telegram.org thỉnh thoảng thất bại ngay lúc MỞ
 // KẾT NỐI (AggregateError ETIMEDOUT từ node:net internalConnectMultiple) — Node mặc định thử
@@ -59,6 +60,11 @@ interface JobMeta {
   totalExpected: number;
   mergeStatus: MergeStatus;
   mergeError?: string;
+  // Kết quả gửi file Excel cuối vào group Telegram sau khi ghép (hiện trên trang job Risky).
+  telegramSentAt?: number;
+  telegramSendError?: string;
+  // Lời nhắn kèm file (giữ lại để "Gửi lại" dùng đúng nội dung).
+  telegramCaption?: string;
 }
 
 export interface TelegramWatchStatus {
@@ -71,6 +77,8 @@ export interface JobTelegramStatus {
   received: ReceivedEntry[];
   mergeStatus?: MergeStatus;
   mergeError?: string;
+  telegramSentAt?: number;
+  telegramSendError?: string;
 }
 
 /** Dùng cho trang web UI — hiện số file đang chờ + danh sách file đã quá hạn cảnh báo. */
@@ -89,6 +97,8 @@ export function getJobTelegramStatus(jobId: string): JobTelegramStatus {
     received: receivedByJob.get(jobId) ?? [],
     mergeStatus: meta?.mergeStatus,
     mergeError: meta?.mergeError,
+    telegramSentAt: meta?.telegramSentAt,
+    telegramSendError: meta?.telegramSendError,
   };
 }
 
@@ -477,6 +487,7 @@ async function catchUpMissedMessages(): Promise<void> {
  */
 export async function sendDocumentToTelegram(filePath: string, caption: string): Promise<void> {
   const token = config.telegramBotToken;
+  if (!token) throw new Error('Chưa cấu hình TELEGRAM_BOT_TOKEN trong .env — không gửi được file vào group.');
   const form = new FormData();
   form.append('chat_id', config.telegramChatId);
   form.append('caption', caption);
@@ -493,7 +504,49 @@ export async function sendDocumentToTelegram(filePath: string, caption: string):
  * vào file Excel gốc (xem `mergeRiskyResultsIntoMaster`). Chỉ chạy đúng 1 lần cho mỗi job
  * (`mergeStatus` đổi từ 'pending' ngay khi bắt đầu chạy, dù thành công hay lỗi).
  */
-async function maybeMergeJob(jobId: string): Promise<void> {
+// server.ts đăng ký: cho biết log của 1 job Risky cần ghi vào đâu (để log bước ghép/gửi Telegram/
+// upload Drive hiện trên trang job, không chỉ nằm trong log hệ thống).
+let jobLogSinkResolver: ((jobId: string) => JobLogSink | undefined) | undefined;
+export function setJobLogSinkResolver(resolver: (jobId: string) => JobLogSink | undefined): void {
+  jobLogSinkResolver = resolver;
+}
+
+function runWithJobLog<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+  const sink = jobLogSinkResolver?.(jobId);
+  return sink ? jobContext.run(sink, fn) : fn();
+}
+
+async function sendFinalToTelegram(meta: JobMeta): Promise<boolean> {
+  try {
+    await sendDocumentToTelegram(meta.masterXlsxPath, meta.telegramCaption ?? '✅ Kết quả cuối.');
+    meta.telegramSentAt = Date.now();
+    meta.telegramSendError = undefined;
+    logger.info(`Đã gửi file Excel cuối vào group Telegram: ${path.basename(meta.masterXlsxPath)}`);
+    return true;
+  } catch (sendErr) {
+    meta.telegramSendError = sendErr instanceof Error ? sendErr.message : String(sendErr);
+    logger.error(`Ghép file thành công nhưng gửi file cuối vào Telegram thất bại (bấm "Gửi lại" trên trang job, hoặc tải từ web):`, sendErr);
+    return false;
+  } finally {
+    saveJobsState();
+  }
+}
+
+/** Gửi lại file Excel cuối của 1 job Risky vào group Telegram (nút "Gửi lại" trên web). */
+export async function resendFinalToTelegram(jobId: string): Promise<{ ok: boolean; message: string }> {
+  const meta = jobMeta.get(jobId);
+  if (!meta || meta.mergeStatus !== 'done') return { ok: false, message: 'Job này chưa ghép xong file cuối.' };
+  const ok = await runWithJobLog(jobId, () => sendFinalToTelegram(meta));
+  return ok
+    ? { ok: true, message: 'Đã gửi file cuối vào group Telegram' }
+    : { ok: false, message: `Gửi thất bại: ${meta.telegramSendError ?? 'không rõ lỗi'}` };
+}
+
+function maybeMergeJob(jobId: string): Promise<void> {
+  return runWithJobLog(jobId, () => maybeMergeJobInner(jobId));
+}
+
+async function maybeMergeJobInner(jobId: string): Promise<void> {
   const meta = jobMeta.get(jobId);
   if (!meta || meta.mergeStatus !== 'pending') return;
   const received = receivedByJob.get(jobId) ?? [];
@@ -506,17 +559,11 @@ async function maybeMergeJob(jobId: string): Promise<void> {
 
     // Gửi luôn file Excel gốc ĐÃ CẬP NHẬT ngược lại group Telegram — team không cần tự vào web UI
     // tìm/tải, kết quả cuối cùng xuất hiện ngay tại nơi team vẫn theo dõi kết quả meetscript.io.
-    try {
-      await sendDocumentToTelegram(
-        meta.masterXlsxPath,
-        `✅ Đã cập nhật kết quả Risky: ${stats.updatedCount} lead (Safe to Send/Do not Send)` +
-          (stats.noMatchCount > 0 ? `, ${stats.noMatchCount} lead chưa khớp được kết quả (vẫn giữ "Risky", cần kiểm tra tay)` : '') +
-          '.',
-      );
-      logger.info(`Đã gửi file Excel gốc (đã cập nhật) vào group Telegram: ${meta.masterXlsxPath}`);
-    } catch (sendErr) {
-      logger.error(`Ghép file thành công nhưng gửi lại vào Telegram thất bại (tải tay từ web UI thay thế):`, sendErr);
-    }
+    meta.telegramCaption =
+      `✅ Đã cập nhật kết quả Risky: ${stats.updatedCount} lead (Safe to Send/Do not Send)` +
+      (stats.noMatchCount > 0 ? `, ${stats.noMatchCount} lead chưa khớp được kết quả (vẫn giữ "Risky", cần kiểm tra tay)` : '') +
+      '.';
+    await sendFinalToTelegram(meta);
 
     // Upload luôn file Excel cuối (đã có đủ Safe to Send/Do not Send) lên Google Drive — tự bỏ qua
     // nếu chưa cấu hình GDRIVE_SAFE_TO_SEND_FOLDER_ID, không ảnh hưởng gì tới phần còn lại.
