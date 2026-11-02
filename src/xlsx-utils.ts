@@ -19,7 +19,7 @@ export function writeRowsAsXlsx(filePath: string, rows: Row[], sheetName = 'Data
   const worksheet = XLSX.utils.json_to_sheet(rows);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-  XLSX.writeFile(workbook, filePath);
+  XLSX.writeFile(workbook, filePath, { compression: true });
 }
 
 /**
@@ -34,7 +34,7 @@ export function writeRiskyExcel(filePath: string, emails: string[], dataSheetNam
   XLSX.utils.book_append_sheet(workbook, worksheet, dataSheetName);
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([]), 'Sheet1');
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([]), 'Sheet2');
-  XLSX.writeFile(workbook, filePath);
+  XLSX.writeFile(workbook, filePath, { compression: true });
 }
 
 /** Đọc 1 sheet (hàng đầu tiên = tên cột) thành mảng Row — ngược lại với `writeRowsAsXlsx`. */
@@ -54,7 +54,7 @@ export function overwriteXlsxSheet(filePath: string, sheetName: string, rows: Ro
   const worksheet = XLSX.utils.json_to_sheet(rows);
   workbook.Sheets[sheetName] = worksheet;
   if (!workbook.SheetNames.includes(sheetName)) workbook.SheetNames.push(sheetName);
-  XLSX.writeFile(workbook, filePath);
+  XLSX.writeFile(workbook, filePath, { compression: true });
 }
 
 /**

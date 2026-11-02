@@ -459,8 +459,7 @@ const CATCH_UP_MESSAGE_LIMIT = 300;
 async function catchUpMissedMessages(): Promise<void> {
   if (!userClient || pending.length === 0) return;
   try {
-    const dialogs = await userClient.getDialogs({ limit: 200 });
-    const dialog = dialogs.find((d) => d.id?.toString() === config.telegramChatId);
+    const dialog = await findGroupDialog();
     if (!dialog?.entity) {
       logger.warn(`Không tìm thấy group TELEGRAM_CHAT_ID=${config.telegramChatId} trong danh sách chat — bỏ qua bước quét lại tin nhắn cũ.`);
       return;
@@ -485,7 +484,31 @@ async function catchUpMissedMessages(): Promise<void> {
  * đang dùng để nghe kết quả meetscript.io) và có quyền gửi tin nhắn/file bình thường trong group.
  * Export để `merge-risky.ts` (lệnh ghép TAY) cũng gửi lại được, nhất quán với luồng tự động.
  */
+/** Tìm đúng group TELEGRAM_CHAT_ID trong danh sách chat của tài khoản người thật. */
+async function findGroupDialog() {
+  if (!userClient) return undefined;
+  const dialogs = await userClient.getDialogs({ limit: 200 });
+  return dialogs.find((d) => d.id?.toString() === config.telegramChatId);
+}
+
+// Bot API chỉ nhận file tối đa 50 MB (quá thì trả 413 "Request Entity Too Large").
+const BOT_API_MAX_BYTES = 49 * 1024 * 1024;
+
+/** Gửi file bằng tài khoản người thật (MTProto, giới hạn tới 2 GB) — dùng khi file quá lớn cho bot. */
+async function sendDocumentViaUserAccount(filePath: string, caption: string): Promise<void> {
+  if (!userClient) throw new Error('Tài khoản Telegram (người thật) chưa kết nối — không gửi được file lớn.');
+  const dialog = await findGroupDialog();
+  if (!dialog?.entity) throw new Error(`Không tìm thấy group TELEGRAM_CHAT_ID=${config.telegramChatId} trong tài khoản Telegram người thật.`);
+  await userClient.sendFile(dialog.entity, { file: filePath, caption, forceDocument: true });
+}
+
 export async function sendDocumentToTelegram(filePath: string, caption: string): Promise<void> {
+  const size = fs.statSync(filePath).size;
+  if (size > BOT_API_MAX_BYTES) {
+    logger.info(`File ${(size / 1024 / 1024).toFixed(1)} MB vượt giới hạn 50 MB của bot — gửi bằng tài khoản Telegram người thật.`);
+    await sendDocumentViaUserAccount(filePath, caption);
+    return;
+  }
   const token = config.telegramBotToken;
   if (!token) throw new Error('Chưa cấu hình TELEGRAM_BOT_TOKEN trong .env — không gửi được file vào group.');
   const form = new FormData();
@@ -493,7 +516,12 @@ export async function sendDocumentToTelegram(filePath: string, caption: string):
   form.append('caption', caption);
   form.append('document', new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
   const res = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendDocument`, 45_000, { method: 'POST', body: form });
-  const data = (await res.json()) as { ok: boolean; description?: string };
+  const data = (await res.json().catch(() => ({ ok: false, error_code: res.status }))) as { ok: boolean; error_code?: number; description?: string };
+  if (!data.ok && (data.error_code === 413 || res.status === 413)) {
+    logger.warn('Bot báo file quá lớn (413) — gửi lại bằng tài khoản Telegram người thật.');
+    await sendDocumentViaUserAccount(filePath, caption);
+    return;
+  }
   if (!data.ok) {
     throw new Error(`Telegram sendDocument thất bại: ${JSON.stringify(data)}`);
   }
